@@ -52,3 +52,8 @@ Authentication → URL Configuration → **Site URL** = your Vercel URL, so sign
 ## 6. Marketplaces
 Use `https://<your-render-url>/api/integrations/<shopee|lazada|tiktok_shop>/callback` as the
 redirect URL in each platform's developer console (Settings → Integrations shows the exact URL).
+
+## Troubleshooting: Vercel says "Deployment Blocked"
+Vercel's free (Hobby) plan only deploys commits whose git author is the account owner.
+Set your own name and GitHub email once (`git config --global user.name "..."` and
+`git config --global user.email "..."`), then make a new commit and push.

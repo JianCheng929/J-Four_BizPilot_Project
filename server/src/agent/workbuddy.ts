@@ -146,9 +146,13 @@ export const cliPath = () => process.env.CODEBUDDY_CODE_PATH || undefined;
 export function runtimeEnv(): Record<string, string> {
   const keep = /^(PATH|Path|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|SystemRoot|SYSTEMROOT|ComSpec|TEMP|TMP|TMPDIR|LANG|LC_ALL|HOMEDRIVE|HOMEPATH|PROGRAMFILES|ProgramFiles|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|CODEBUDDY_.*)$/;
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && keep.test(k)) env[k] = v;
+  // The SDK merges process.env into the child's environment, so anything not
+  // kept is blanked explicitly: database and integration secrets never reach it.
+  for (const [k, v] of Object.entries(process.env)) env[k] = v !== undefined && keep.test(k) ? v : '';
   // A bare access token has no user id or refresh token (it gave 401) and would override the real login.
-  delete env.CODEBUDDY_AUTH_TOKEN;
+  env.CODEBUDDY_AUTH_TOKEN = '';
+  // Each runtime is a large Node process; keep its heap small on a 512 MB server.
+  env.NODE_OPTIONS = process.env.WORKBUDDY_NODE_OPTIONS || '--max-old-space-size=256';
   return env;
 }
 
@@ -179,6 +183,20 @@ type Health = { online: boolean; checkedAt: number; error: string | null };
 let health: Health | null = null;
 let checking: Promise<Health> | null = null;
 
+/**
+ * How many WorkBuddy runtimes are running (agent runs, sign-ins). Each one
+ * needs a few hundred MB, so health checks never start a second one alongside.
+ */
+let busy = 0;
+export async function withRuntime<T>(fn: () => Promise<T>): Promise<T> {
+  busy++;
+  try {
+    return await fn();
+  } finally {
+    busy--;
+  }
+}
+
 const AUTH_ERR = /auth|login|log in|token|401|403|unauthori|credential|not signed/i;
 
 /** Record the outcome of a real agent run so status stays accurate without extra checks. */
@@ -199,6 +217,8 @@ export function reportRun(ok: boolean, error?: string) {
 export async function checkEngine(force = false): Promise<Health> {
   if (!force && health && Date.now() - health.checkedAt < 10 * 60_000) return health;
   if (checking) return checking;
+  // Something is already using the runtime: don't start another just to check.
+  if (busy > 0) return health ?? { online: true, checkedAt: Date.now(), error: null };
   checking = (async () => {
     try {
       // Ask the runtime who is signed in, the same way WorkBuddy's own sign-in does.
@@ -206,7 +226,7 @@ export async function checkEngine(force = false): Promise<Health> {
       const signedIn = await new Promise<string>((resolve, reject) => {
         unstable_v2_authenticate({
           environment,
-          timeout: 45_000,
+          timeout: 20_000,
           pathToCodebuddyCode: cliPath(),
           env: runtimeEnv(),
           onAuthUrl: () => reject(new Error('not signed in')),

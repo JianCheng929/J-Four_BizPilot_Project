@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { unstable_v2_authenticate, unstable_v2_logout } from '@tencent-ai/agent-sdk';
 import { handle, HttpError } from '../lib/http.ts';
-import { checkEngine, cliPath, environment, forgetLogin, loginDiagnostics, readAccount, rememberAccount, runtimeEnv, saveLogin, status } from '../agent/workbuddy.ts';
+import { checkEngine, cliPath, environment, forgetLogin, loginDiagnostics, withRuntime, readAccount, rememberAccount, reportRun, runtimeEnv, saveLogin, status } from '../agent/workbuddy.ts';
 
 /**
  * Operator-only page for signing the server in to BizPilot's WorkBuddy account.
@@ -40,21 +40,23 @@ admin.post('/workbuddy/login', handle(async (req) => {
   const current: Login = { state: 'waiting', url: null, error: null, startedAt: Date.now() };
   login = current;
   const gotUrl = new Promise<void>((resolve) => {
-    unstable_v2_authenticate({
-      environment,
-      timeout: 10 * 60_000,
-      pathToCodebuddyCode: cliPath(),
-      env: runtimeEnv(),
-      onAuthUrl: ({ authUrl }) => {
-        current.url = authUrl;
-        resolve();
-      },
-    })
+    void withRuntime(() =>
+      unstable_v2_authenticate({
+        environment,
+        timeout: 10 * 60_000,
+        pathToCodebuddyCode: cliPath(),
+        env: runtimeEnv(),
+        onAuthUrl: ({ authUrl }) => {
+          current.url = authUrl;
+          resolve();
+        },
+      }),
+    )
       .then(async (r) => {
         rememberAccount(r.userinfo.userNickname || r.userinfo.userName || r.userinfo.userId);
         current.state = 'done';
+        reportRun(true); // marks the engine online and saves the login
         await saveLogin(true);
-        await checkEngine(true);
       })
       .catch((e: Error) => {
         current.state = 'failed';
@@ -68,7 +70,7 @@ admin.post('/workbuddy/login', handle(async (req) => {
 
 admin.post('/workbuddy/logout', handle(async (req) => {
   checkKey(req);
-  await unstable_v2_logout({ environment, pathToCodebuddyCode: cliPath(), env: runtimeEnv() });
+  await withRuntime(() => unstable_v2_logout({ environment, pathToCodebuddyCode: cliPath(), env: runtimeEnv() }));
   login = null;
   await forgetLogin();
   await checkEngine(true);

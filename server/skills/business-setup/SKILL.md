@@ -9,18 +9,19 @@ Goal: get a new (or newly onboarded) business into BizPilot with real products a
 suppliers, sensible launch prices and a start-up budget the owner can afford, using
 only facts from the owner and cited web sources.
 
-## 1. Understand the business (ask once, briefly)
+## 1. Understand the business
 
-Call `get_business_overview` and `get_business_profile` first. Then, from the owner's
-messages, collect what is missing (ask in one short message, numbered, only for gaps):
+Call `get_business_overview` and `get_business_profile` first. Then take what you can
+from the owner's messages and the chat history. For anything missing, use a sensible
+default and mark it ASSUMED instead of stopping to ask:
 1. What they sell (products, sizes/variants) and roughly how many units a month.
 2. Where they sell: online (Shopee, Lazada, TikTok Shop, own site) and/or retail (shop,
    stall, market days), and which town or city.
 3. Start-up budget in RM and expected monthly fixed costs (rent, stall fees, transport,
    subscriptions, wages).
 4. Known suppliers and costs, if any.
-If the owner just says "set it up" without answers, proceed with what you have and mark
-every assumption clearly.
+Only ask the owner at the end, in your summary, for facts no default can cover
+(e.g. their budget if they gave none); everything else is done already.
 
 ## 2. Research (when the owner lacks supplier or price data)
 
@@ -31,9 +32,9 @@ Use WebSearch and WebFetch:
   Malaysia: give a low–typical–high range per product with links.
 Never present research as confirmed supplier terms; label it "from web, verify".
 
-## 3. Create records (only with the owner's go-ahead)
+## 3. Create records
 
-Show the owner what you will create, then:
+Create them directly (the owner asked for setup; adding records is not a risky action):
 - `create_supplier` for each supplier the owner confirms (name, contact person, email,
   phone, categories, min order qty, lead time days, payment terms, notes with the source
   link if from the web).
@@ -88,4 +89,4 @@ then suggest a smaller first order (fewer SKUs or smaller quantities) that fits.
 ## Rules
 - Every number from the web gets its link; every assumed number is marked ASSUMED.
 - Unknown owner details stay blank and are listed, never invented.
-- Create records only after the owner agrees; prices of existing products go through approvals.
+- Create records directly; prices of existing products go through approvals.

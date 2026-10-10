@@ -344,6 +344,8 @@ export interface AgentEvent {
 
 export interface AgentTask {
   id: string;
+  /** Chat this message belongs to (the id of the chat's first message). */
+  conversationId?: string | null;
   prompt: string;
   mode: 'cloud' | 'local';
   status: 'starting' | 'running' | 'waiting_permission' | 'completed' | 'failed' | 'cancelled';

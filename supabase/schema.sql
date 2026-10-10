@@ -314,6 +314,9 @@ create table if not exists agent_tasks (
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+-- Command Centre chats: every message in one chat shares a conversation_id.
+alter table agent_tasks add column if not exists conversation_id text;
+create index if not exists idx_agent_tasks_conv on agent_tasks (business_id, conversation_id, created_at);
 
 -- 9. External integrations (credentials are only readable by the server's service role)
 create table if not exists integrations (

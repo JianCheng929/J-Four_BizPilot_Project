@@ -6,7 +6,9 @@ import type { AgentEvent, ApprovalRequest, BizPilotDB, ContentItem } from '../..
 import { readSnapshot, withBusiness } from '../lib/workspace.ts';
 import { executeApproval } from '../lib/execute.ts';
 import { quoteForOrder, requestBooking } from '../lib/shipping.ts';
-import { requestEinvoiceSubmit } from '../lib/einvoice.ts';
+import { checkTin, requestEinvoiceSubmit } from '../lib/einvoice.ts';
+import { missingSupplierFields } from '../providers/myinvois.ts';
+import { getSkill, listSkills } from './skills.ts';
 import { syncMarketplace } from '../lib/sync.ts';
 import { PROVIDERS } from '../providers/index.ts';
 import { isConfigured, providerContext } from '../lib/integrations.ts';
@@ -196,6 +198,58 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
 
     tool('list_approvals', 'Approval queue.', { status: z.enum(['pending', 'approved', 'rejected']).default('pending') },
       safe(async ({ status }) => (await readSnapshot(businessId)).approvals.filter((a) => a.status === status).slice(0, 50).map((a) => ({ id: a.id, type: a.type, title: a.title, amount: a.amount, risk: a.risk, executionResult: a.executionResult })))),
+
+    // ------------------------------------------------------------ skills and extra reads
+    tool('load_skill', 'Load the full instructions of a BizPilot skill (see the skills list in your instructions). Call this before doing a task the skill covers, then follow it.',
+      { name: z.string() },
+      safe(async ({ name }) => {
+        const skill = getSkill(name);
+        if (!skill) throw new Error(`No skill called "${name}". Available: ${listSkills().map((k) => k.name).join(', ')}.`);
+        emit({ kind: 'status', text: `Using skill: ${skill.name}` });
+        return skill.body;
+      })),
+
+    tool('get_business_profile', 'The business legal and tax identity (registered name, TIN, SSM no., SST no., MSIC, address, contact), invoice settings and which fields LHDN MyInvois still needs.', {},
+      safe(async () => {
+        const s = (await readSnapshot(businessId)).settings;
+        return {
+          tradingName: s.name, legalName: s.legalName, tin: s.tin, ssmBrn: s.brn, sstNo: s.sstNo, msicCode: s.msicCode, msicDescription: s.msicDescription,
+          email: s.email, phone: s.phone, address: [s.addressLine, s.postcode, s.city].filter(Boolean).join(', '), stateCode: s.stateCode,
+          defaultTaxRatePct: s.defaultTaxRate, invoicePrefix: s.invoicePrefix, shipFromPostcode: s.shipFromPostcode,
+          lowStockThresholdDays: s.lowStockThresholdDays, approvalLimit: s.approvalLimitAmount, automationLevel: s.automationLevel,
+          missingForEinvoice: missingSupplierFields(s),
+        };
+      })),
+
+    tool('get_invoice', 'Full detail of one invoice: buyer details, lines, tax, totals, status and MyInvois e-invoice state.',
+      { invoice: z.string().describe('Invoice id or number') },
+      safe(async ({ invoice }) => {
+        const db = await readSnapshot(businessId);
+        const inv = db.invoices.find((i) => i.id === invoice || i.invoiceNumber === invoice);
+        if (!inv) throw new Error('Invoice not found.');
+        return inv;
+      })),
+
+    tool('check_buyer_tin', 'Validate a buyer TIN with LHDN MyInvois (needs MyInvois connected). idType: BRN (company SSM no.), NRIC, PASSPORT or ARMY.',
+      { tin: z.string(), idType: z.enum(['BRN', 'NRIC', 'PASSPORT', 'ARMY']), idValue: z.string() },
+      safe(async ({ tin, idType, idValue }) => checkTin(businessId, tin, idType, idValue))),
+
+    tool('list_expenses', 'Expenses and bills for the last N days (paid and unpaid), with totals by category and the recurring monthly total.',
+      { days: z.number().int().min(1).max(366).default(30), unpaidOnly: z.boolean().optional() },
+      safe(async ({ days, unpaidOnly }) => {
+        const db = await readSnapshot(businessId);
+        const since = Date.now() - days * 86_400_000;
+        const list = db.expenses.filter((e) => (unpaidOnly ? !e.paid : new Date(e.date).getTime() >= since));
+        const byCategory: Record<string, number> = {};
+        for (const e of list) byCategory[e.category] = r2((byCategory[e.category] ?? 0) + e.amount);
+        const recurring = db.expenses.filter((e) => e.recurring);
+        return {
+          days, total: r2(list.reduce((t, e) => t + e.amount, 0)), byCategory,
+          recurringMonthly: r2(recurring.reduce((t, e) => t + e.amount, 0)),
+          recurringItems: recurring.map((e) => ({ category: e.category, description: e.description, amount: e.amount })),
+          items: list.slice(0, 100).map((e) => ({ date: e.date, category: e.category, description: e.description, amount: e.amount, paid: e.paid, dueDate: e.dueDate ?? null, recurring: e.recurring })),
+        };
+      })),
 
     // ------------------------------------------------------------ write: master data
     tool('create_product', 'Add a new product to the catalogue (stock starts at openingStock).',

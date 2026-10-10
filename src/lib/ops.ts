@@ -7,6 +7,9 @@ import type {
   Expense,
   Invoice,
   InvoiceLine,
+  Location,
+  StockCount,
+  StockTransfer,
   Product,
   PurchaseOrder,
   ReturnCase,
@@ -173,6 +176,7 @@ export function recordStockMovement(
   reason: string,
   reference: string,
   actor: string,
+  opts: { locationId?: string | null; strict?: boolean } = {},
 ): StockMovement {
   const p = db.products.find((x) => x.id === productId);
   if (!p) throw new OpError('Product not found for stock movement.');
@@ -183,6 +187,7 @@ export function recordStockMovement(
     throw new OpError(`Not enough stock of ${p.name}: on hand ${p.stock}, requested ${Math.abs(delta)}.`);
   }
   const before = p.stock;
+  const locationId = applyLocationDelta(db, p, delta, opts);
   p.stock += delta;
   // Writing off damaged or expired goods removes them from held stock first.
   if (type === 'out' && (p.unavailable || 0) > 0 && /damag|expir|quarantin|defect/i.test(reason)) {
@@ -190,10 +195,375 @@ export function recordStockMovement(
   }
   if ((p.unavailable || 0) > p.stock) p.unavailable = p.stock;
   const mv: StockMovement = { id: newId(), productId, type, quantity, reason, reference, date: now(), actor };
+  if (locationId) mv.locationId = locationId;
   db.stockMovements.unshift(mv);
-  audit(db, actor, 'stock_' + type, 'product', p.sku, `${p.name}: ${before} → ${p.stock} (${reason})`);
+  const where = locationId ? ` at ${db.locations.find((l) => l.id === locationId)?.name ?? 'location'}` : '';
+  audit(db, actor, 'stock_' + type, 'product', p.sku, `${p.name}: ${before} → ${p.stock}${where} (${reason})`);
   checkLowStock(db, p);
   return mv;
+}
+
+// ---------------------------------------------------------------- locations (blueprint §3, A5, B5)
+
+/** Key in Product.locationStock for units on a transfer between locations. */
+export const IN_TRANSIT = '__transit__';
+
+export function defaultLocation(db: BizPilotDB): Location | null {
+  return db.locations.find((l) => l.isDefault && l.active) ?? db.locations.find((l) => l.active) ?? null;
+}
+
+/** Units per location, with stock not yet assigned to a location counted at the default location. */
+export function locationBreakdown(db: BizPilotDB, p: Product): Record<string, number> {
+  const def = defaultLocation(db);
+  const ls: Record<string, number> = { ...(p.locationStock ?? {}) };
+  if (!def) return ls;
+  const assigned = Object.values(ls).reduce((a, b) => a + b, 0);
+  const loose = p.stock - assigned;
+  if (loose !== 0) ls[def.id] = (ls[def.id] ?? 0) + loose;
+  return ls;
+}
+
+/** Units of a product at one location. '' or no locations = the whole business. */
+export function stockAt(db: BizPilotDB, p: Product, locationId?: string | null): number {
+  if (!locationId || !db.locations.length) return p.stock;
+  return Math.max(0, locationBreakdown(db, p)[locationId] ?? 0);
+}
+
+function tidy(ls: Record<string, number>) {
+  for (const k of Object.keys(ls)) if (!ls[k]) delete ls[k];
+  return ls;
+}
+
+/**
+ * Apply a stock change to the per-location numbers. Units leave the chosen
+ * location first; unless `strict`, any shortfall is taken from the other
+ * locations with the most stock. Returns the location used, or null when the
+ * business has no locations.
+ */
+function applyLocationDelta(db: BizPilotDB, p: Product, delta: number, opts: { locationId?: string | null; strict?: boolean }): string | null {
+  const def = defaultLocation(db);
+  if (!def) return null;
+  const loc = opts.locationId || def.id;
+  const location = db.locations.find((l) => l.id === loc);
+  if (!location) throw new OpError('That location does not exist.');
+  const ls = locationBreakdown(db, p);
+  if (delta >= 0) {
+    ls[loc] = (ls[loc] ?? 0) + delta;
+  } else {
+    let need = -delta;
+    const here = Math.max(0, ls[loc] ?? 0);
+    if (opts.strict && here < need) throw new OpError(`Only ${here} of ${p.name} at ${location.name}.`);
+    const take = (id: string) => {
+      const have = Math.max(0, ls[id] ?? 0);
+      const t = Math.min(have, need);
+      ls[id] = have - t;
+      need -= t;
+    };
+    take(loc);
+    const others = Object.keys(ls).filter((id) => id !== loc && id !== IN_TRANSIT).sort((a, b) => (ls[b] ?? 0) - (ls[a] ?? 0));
+    for (const id of others) if (need > 0) take(id);
+    if (need > 0) throw new OpError(`Not enough ${p.name} outside transfers in progress: ${need} more needed.`);
+  }
+  p.locationStock = tidy(ls);
+  return loc;
+}
+
+export interface LocationInput {
+  name: string;
+  type?: Location['type'];
+  address?: string;
+  isDefault?: boolean;
+}
+
+export function createLocation(db: BizPilotDB, input: LocationInput, actor: string): Location {
+  const name = input.name?.trim();
+  if (!name) throw new OpError('Location name is required.');
+  if (db.locations.some((l) => l.name.toLowerCase() === name.toLowerCase())) throw new OpError(`A location called ${name} already exists.`);
+  const first = db.locations.length === 0;
+  const loc: Location = { id: newId(), name, type: input.type ?? 'store', address: input.address?.trim() ?? '', isDefault: first, active: true, createdAt: now() };
+  db.locations.push(loc);
+  if (first) {
+    // Everything already on hand is at the first location.
+    for (const p of db.products) if (p.stock > 0) p.locationStock = { [loc.id]: p.stock };
+  } else if (input.isDefault) setDefaultLocation(db, loc.id, actor);
+  audit(db, actor, 'create', 'location', loc.id, `Location ${name} (${loc.type})${first ? ', default; all current stock placed here' : ''}`);
+  return loc;
+}
+
+export function setDefaultLocation(db: BizPilotDB, id: string, actor: string) {
+  const loc = db.locations.find((l) => l.id === id);
+  if (!loc) throw new OpError('Location not found.');
+  if (!loc.active) throw new OpError('Reactivate the location first.');
+  // Pin unassigned units to the old default before switching, so nothing moves.
+  for (const p of db.products) p.locationStock = tidy(locationBreakdown(db, p));
+  db.locations.forEach((l) => (l.isDefault = l.id === id));
+  audit(db, actor, 'update', 'location', id, `${loc.name} is now the default location`);
+}
+
+export function updateLocation(db: BizPilotDB, id: string, patch: Partial<Pick<Location, 'name' | 'type' | 'address' | 'active'>>, actor: string): Location {
+  const loc = db.locations.find((l) => l.id === id);
+  if (!loc) throw new OpError('Location not found.');
+  if (patch.name !== undefined) {
+    const n = patch.name.trim();
+    if (!n) throw new OpError('Location name is required.');
+    if (db.locations.some((l) => l.id !== id && l.name.toLowerCase() === n.toLowerCase())) throw new OpError(`A location called ${n} already exists.`);
+    loc.name = n;
+  }
+  if (patch.type) loc.type = patch.type;
+  if (patch.address !== undefined) loc.address = patch.address.trim();
+  if (patch.active === false && loc.active) {
+    const units = db.products.reduce((s, p) => s + stockAt(db, p, id), 0);
+    if (units > 0) throw new OpError(`${loc.name} still holds ${units} unit(s). Transfer them out first.`);
+    if (db.transfers.some((t) => t.status === 'in_transit' && (t.fromLocationId === id || t.toLocationId === id))) throw new OpError(`${loc.name} has transfers in progress.`);
+    if (loc.isDefault) throw new OpError('Make another location the default first.');
+    loc.active = false;
+  } else if (patch.active === true) loc.active = true;
+  audit(db, actor, 'update', 'location', id, `Location ${loc.name} updated`);
+  return loc;
+}
+
+// ---------------------------------------------------------------- transfers
+
+export interface TransferInput {
+  fromLocationId: string;
+  toLocationId: string;
+  lines: { productId: string; quantity: number }[];
+  note?: string;
+}
+
+export function createTransfer(db: BizPilotDB, input: TransferInput, actor: string, shipNow = false): StockTransfer {
+  const from = db.locations.find((l) => l.id === input.fromLocationId && l.active);
+  const to = db.locations.find((l) => l.id === input.toLocationId && l.active);
+  if (!from || !to) throw new OpError('Choose two active locations.');
+  if (from.id === to.id) throw new OpError('From and to must be different locations.');
+  const lines = input.lines.filter((l) => l.quantity);
+  if (!lines.length) throw new OpError('Add at least one product to transfer.');
+  for (const l of lines) {
+    if (!Number.isInteger(l.quantity) || l.quantity <= 0) throw new OpError('Transfer quantities must be whole numbers above 0.');
+    if (!db.products.some((p) => p.id === l.productId)) throw new OpError('Unknown product on the transfer.');
+  }
+  const t: StockTransfer = {
+    id: newId(),
+    transferNumber: nextNumber(db.transfers.map((x) => x.transferNumber), 'TRF'),
+    fromLocationId: from.id,
+    toLocationId: to.id,
+    lines: lines.map((l) => ({ productId: l.productId, quantity: l.quantity, receivedQty: 0 })),
+    status: 'draft',
+    note: input.note?.trim() ?? '',
+    createdAt: now(),
+    shippedAt: null,
+    receivedAt: null,
+    createdBy: actor,
+  };
+  db.transfers.unshift(t);
+  audit(db, actor, 'create', 'transfer', t.transferNumber, `${t.transferNumber}: ${from.name} → ${to.name}, ${lines.length} line(s)`);
+  if (shipNow) shipTransfer(db, t.id, actor);
+  return t;
+}
+
+/** Goods leave the source location and are "in transit" until received. */
+export function shipTransfer(db: BizPilotDB, id: string, actor: string): StockTransfer {
+  const t = db.transfers.find((x) => x.id === id || x.transferNumber === id);
+  if (!t) throw new OpError('Transfer not found.');
+  if (t.status !== 'draft') throw new OpError(`${t.transferNumber} is already ${t.status.replace('_', ' ')}.`);
+  const from = db.locations.find((l) => l.id === t.fromLocationId)!;
+  const to = db.locations.find((l) => l.id === t.toLocationId)!;
+  // Check every line first so a shortage leaves nothing half-moved.
+  for (const l of t.lines) {
+    const p = db.products.find((x) => x.id === l.productId);
+    if (!p) throw new OpError('A product on this transfer no longer exists.');
+    const here = stockAt(db, p, from.id);
+    if (here < l.quantity) throw new OpError(`Only ${here} of ${p.name} at ${from.name}; the transfer needs ${l.quantity}.`);
+  }
+  for (const l of t.lines) {
+    const p = db.products.find((x) => x.id === l.productId)!;
+    const ls = locationBreakdown(db, p);
+    ls[from.id] = (ls[from.id] ?? 0) - l.quantity;
+    ls[IN_TRANSIT] = (ls[IN_TRANSIT] ?? 0) + l.quantity;
+    p.locationStock = tidy(ls);
+    db.stockMovements.unshift({ id: newId(), productId: p.id, type: 'transfer', quantity: l.quantity, reason: `Shipped ${t.transferNumber} to ${to.name}`, reference: t.transferNumber, date: now(), actor, locationId: from.id, toLocationId: to.id });
+  }
+  t.status = 'in_transit';
+  t.shippedAt = now();
+  audit(db, actor, 'ship', 'transfer', t.transferNumber, `${t.transferNumber} left ${from.name}`);
+  return t;
+}
+
+/**
+ * Goods arrive. `received` gives units per product (default: everything sent).
+ * Units sent but not received are written off as lost in transit and the owner is told.
+ */
+export function receiveTransfer(db: BizPilotDB, id: string, received: Record<string, number> | 'all', actor: string): StockTransfer {
+  const t = db.transfers.find((x) => x.id === id || x.transferNumber === id);
+  if (!t) throw new OpError('Transfer not found.');
+  if (t.status !== 'in_transit') throw new OpError(`${t.transferNumber} is ${t.status.replace('_', ' ')}; only transfers in transit can be received.`);
+  const to = db.locations.find((l) => l.id === t.toLocationId)!;
+  const short: string[] = [];
+  for (const l of t.lines) {
+    const got = received === 'all' ? l.quantity : Math.max(0, Math.min(l.quantity, Math.floor(Number(received[l.productId] ?? 0))));
+    l.receivedQty = got;
+    const p = db.products.find((x) => x.id === l.productId);
+    if (!p) continue;
+    const ls = locationBreakdown(db, p);
+    ls[IN_TRANSIT] = Math.max(0, (ls[IN_TRANSIT] ?? 0) - l.quantity);
+    ls[to.id] = (ls[to.id] ?? 0) + got;
+    p.locationStock = tidy(ls);
+    db.stockMovements.unshift({ id: newId(), productId: p.id, type: 'transfer', quantity: got, reason: `Received ${t.transferNumber} at ${to.name}`, reference: t.transferNumber, date: now(), actor, locationId: t.fromLocationId, toLocationId: to.id });
+    const lost = l.quantity - got;
+    if (lost > 0) {
+      p.stock -= lost;
+      if ((p.unavailable || 0) > p.stock) p.unavailable = p.stock;
+      db.stockMovements.unshift({ id: newId(), productId: p.id, type: 'out', quantity: lost, reason: `Missing on ${t.transferNumber}`, reference: t.transferNumber, date: now(), actor, locationId: IN_TRANSIT });
+      short.push(`${p.name} ${got} of ${l.quantity}`);
+    }
+  }
+  t.status = 'received';
+  t.receivedAt = now();
+  if (short.length) notify(db, `Transfer short: ${t.transferNumber}`, `Received ${short.join(', ')}. The missing units were written off; check with whoever sent them.`, 'warning');
+  audit(db, actor, 'receive', 'transfer', t.transferNumber, `${t.transferNumber} received at ${to.name}${short.length ? ` (short: ${short.join(', ')})` : ''}`);
+  return t;
+}
+
+export function cancelTransfer(db: BizPilotDB, id: string, actor: string): StockTransfer {
+  const t = db.transfers.find((x) => x.id === id || x.transferNumber === id);
+  if (!t) throw new OpError('Transfer not found.');
+  if (t.status === 'received' || t.status === 'cancelled') throw new OpError(`${t.transferNumber} is already ${t.status}.`);
+  if (t.status === 'in_transit') {
+    // Goods go back to where they came from.
+    for (const l of t.lines) {
+      const p = db.products.find((x) => x.id === l.productId);
+      if (!p) continue;
+      const ls = locationBreakdown(db, p);
+      ls[IN_TRANSIT] = Math.max(0, (ls[IN_TRANSIT] ?? 0) - l.quantity);
+      ls[t.fromLocationId] = (ls[t.fromLocationId] ?? 0) + l.quantity;
+      p.locationStock = tidy(ls);
+    }
+  }
+  t.status = 'cancelled';
+  audit(db, actor, 'cancel', 'transfer', t.transferNumber, `${t.transferNumber} cancelled`);
+  return t;
+}
+
+export interface TransferSuggestion {
+  product: Product;
+  from: Location;
+  to: Location;
+  quantity: number;
+  reason: string;
+}
+
+/**
+ * Blueprint workflow B step 2: before buying more, move stock from a location
+ * that has spare to one that is below its reorder level.
+ */
+export function transferSuggestions(db: BizPilotDB): TransferSuggestion[] {
+  const active = db.locations.filter((l) => l.active);
+  if (active.length < 2) return [];
+  const out: TransferSuggestion[] = [];
+  for (const p of db.products.filter((x) => x.status === 'active' && x.reorderLevel > 0)) {
+    const ls = locationBreakdown(db, p);
+    const at = (l: Location) => Math.max(0, ls[l.id] ?? 0);
+    const short = active.filter((l) => l.type !== 'warehouse' || active.every((x) => x.type === 'warehouse')).filter((l) => at(l) < p.reorderLevel);
+    for (const to of short) {
+      const need = p.reorderLevel + (p.safetyStock || 0) - at(to);
+      const donor = active.filter((l) => l.id !== to.id && at(l) > p.reorderLevel).sort((a, b) => at(b) - at(a))[0];
+      if (!donor || need <= 0) continue;
+      const qty = Math.min(need, at(donor) - p.reorderLevel);
+      if (qty <= 0) continue;
+      out.push({ product: p, from: donor, to, quantity: qty, reason: `${to.name} has ${at(to)} (reorder level ${p.reorderLevel}); ${donor.name} has ${at(donor)}.` });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- stock counts (blueprint B4)
+
+export function startStockCount(db: BizPilotDB, input: { locationId?: string | null; productIds?: string[]; blind?: boolean; note?: string }, actor: string): StockCount {
+  const locationId = input.locationId || '';
+  if (locationId && !db.locations.some((l) => l.id === locationId && l.active)) throw new OpError('Choose an active location.');
+  const products = (input.productIds?.length ? db.products.filter((p) => input.productIds!.includes(p.id)) : db.products.filter((p) => p.status !== 'discontinued'));
+  if (!products.length) throw new OpError('There are no products to count.');
+  const c: StockCount = {
+    id: newId(),
+    countNumber: nextNumber(db.stockCounts.map((x) => x.countNumber), 'CNT'),
+    locationId,
+    blind: Boolean(input.blind),
+    status: 'open',
+    lines: products.map((p) => ({ productId: p.id, expected: stockAt(db, p, locationId), counted: null })),
+    note: input.note?.trim() ?? '',
+    createdAt: now(),
+    submittedAt: null,
+    decidedAt: null,
+    createdBy: actor,
+  };
+  db.stockCounts.unshift(c);
+  const where = locationId ? db.locations.find((l) => l.id === locationId)!.name : 'all stock';
+  audit(db, actor, 'create', 'stock_count', c.countNumber, `${c.countNumber} started (${where}, ${c.lines.length} products${c.blind ? ', blind' : ''})`);
+  return c;
+}
+
+export function recordCount(db: BizPilotDB, countId: string, productId: string, counted: number | null) {
+  const c = db.stockCounts.find((x) => x.id === countId);
+  if (!c) throw new OpError('Stock count not found.');
+  if (c.status !== 'open') throw new OpError(`${c.countNumber} is already ${c.status}.`);
+  const line = c.lines.find((l) => l.productId === productId);
+  if (!line) throw new OpError('That product is not on this count.');
+  if (counted !== null && (!Number.isInteger(counted) || counted < 0)) throw new OpError('Counts must be whole numbers, 0 or more.');
+  line.counted = counted;
+}
+
+/** Differences go to Approvals as one request; a count with no differences closes straight away. */
+export function submitStockCount(db: BizPilotDB, countId: string, actor: string): { count: StockCount; approval: ApprovalRequest | null } {
+  const c = db.stockCounts.find((x) => x.id === countId || x.countNumber === countId);
+  if (!c) throw new OpError('Stock count not found.');
+  if (c.status !== 'open') throw new OpError(`${c.countNumber} is already ${c.status}.`);
+  const counted = c.lines.filter((l) => l.counted !== null);
+  if (!counted.length) throw new OpError('Enter at least one counted quantity.');
+  c.submittedAt = now();
+  const diffs = counted.filter((l) => l.counted !== l.expected);
+  if (!diffs.length) {
+    c.status = 'approved';
+    c.decidedAt = now();
+    audit(db, actor, 'submit', 'stock_count', c.countNumber, `${c.countNumber}: ${counted.length} product(s) counted, no differences`);
+    return { count: c, approval: null };
+  }
+  c.status = 'submitted';
+  const value = diffs.reduce((s, l) => s + Math.abs((l.counted ?? 0) - l.expected) * (db.products.find((p) => p.id === l.productId)?.unitCost ?? 0), 0);
+  const where = c.locationId ? db.locations.find((l) => l.id === c.locationId)?.name ?? 'location' : 'all stock';
+  const approval = requestApproval(db, {
+    type: 'stock_count',
+    title: `${c.countNumber}: correct ${diffs.length} stock difference(s) at ${where}`,
+    description: diffs.slice(0, 15).map((l) => {
+      const p = db.products.find((x) => x.id === l.productId);
+      const d = (l.counted ?? 0) - l.expected;
+      return `${p?.name ?? 'item'}: system ${l.expected}, counted ${l.counted} (${d > 0 ? '+' : ''}${d})`;
+    }).join('\n') + (diffs.length > 15 ? `\n…and ${diffs.length - 15} more` : ''),
+    payload: { countId: c.id },
+    amount: round2(value),
+  }, actor);
+  audit(db, actor, 'submit', 'stock_count', c.countNumber, `${c.countNumber}: ${diffs.length} difference(s) worth RM${value.toFixed(2)} sent for approval`);
+  return { count: c, approval };
+}
+
+/** On approval: adjust each counted product by (counted − expected at count start). */
+export function applyStockCount(db: BizPilotDB, countId: string, actor: string): string {
+  const c = db.stockCounts.find((x) => x.id === countId);
+  if (!c) throw new OpError('Stock count no longer exists.');
+  if (c.status !== 'submitted') return `${c.countNumber} was already ${c.status}.`;
+  let changed = 0;
+  for (const l of c.lines) {
+    if (l.counted === null || l.counted === l.expected) continue;
+    const p = db.products.find((x) => x.id === l.productId);
+    if (!p) continue;
+    // Sales since the count started are already in the system, so apply the difference, not the count.
+    const delta = Math.max(l.counted - l.expected, -stockAt(db, p, c.locationId));
+    if (!delta) continue;
+    recordStockMovement(db, p.id, 'adjustment', delta, `Stock count ${c.countNumber}`, c.countNumber, actor, { locationId: c.locationId || null, strict: Boolean(c.locationId) });
+    changed++;
+  }
+  c.status = 'approved';
+  c.decidedAt = now();
+  return `${c.countNumber}: ${changed} product(s) corrected.`;
 }
 
 /** Blueprint B2: on hand − reserved − unavailable (damaged, expired, quarantined). */
@@ -383,6 +753,8 @@ export interface POInput {
   lines: PurchaseOrderLine[];
   note?: string;
   expectedDate?: string;
+  /** Deliver to this location (default location if empty) */
+  locationId?: string | null;
 }
 
 export function createPurchaseOrder(db: BizPilotDB, input: POInput, actor: string, status: PurchaseOrder['status'] = 'draft'): PurchaseOrder {
@@ -406,6 +778,10 @@ export function createPurchaseOrder(db: BizPilotDB, input: POInput, actor: strin
     sentAt: null,
     note: input.note ?? '',
   };
+  if (input.locationId) {
+    if (!db.locations.some((l) => l.id === input.locationId && l.active)) throw new OpError('Choose an active delivery location.');
+    po.locationId = input.locationId;
+  }
   db.purchaseOrders.unshift(po);
   audit(db, actor, 'create', 'purchase_order', po.poNumber, `${po.poNumber} for ${supplier.name} (RM${po.totalCost.toFixed(2)}) – ${status}`);
   return po;
@@ -460,7 +836,7 @@ export function receivePurchaseOrder(
         const totalUnits = p.stock + qty;
         p.unitCost = round2(totalUnits > 0 ? (p.unitCost * p.stock + l.unitCost * qty) / totalUnits : l.unitCost);
       }
-      recordStockMovement(db, p.id, 'in', qty, `Received ${po.poNumber}`, po.poNumber, actor);
+      recordStockMovement(db, p.id, 'in', qty, `Received ${po.poNumber}`, po.poNumber, actor, { locationId: po.locationId });
     }
   }
   const complete = po.lines.every((l) => (l.receivedQty ?? 0) >= l.quantity);
@@ -509,6 +885,8 @@ export interface SalesOrderInput {
   date?: string;
   /** POS / walk-in sales are handed over immediately */
   fulfilNow?: boolean;
+  /** Shop or warehouse the goods leave from (default location if empty) */
+  locationId?: string | null;
 }
 
 export function createSalesOrder(db: BizPilotDB, input: SalesOrderInput, actor: string): SalesOrder {
@@ -541,6 +919,10 @@ export function createSalesOrder(db: BizPilotDB, input: SalesOrderInput, actor: 
     shipment: null,
     invoiceId: null,
   };
+  if (input.locationId) {
+    if (!db.locations.some((l) => l.id === input.locationId && l.active)) throw new OpError('Choose an active location for this sale.');
+    order.locationId = input.locationId;
+  }
   // Reserve stock so it can't be oversold (blueprint B5)
   for (const l of order.lines) {
     if (!l.productId) continue;
@@ -569,7 +951,7 @@ export function fulfilSalesOrder(db: BizPilotDB, orderId: string, actor: string)
     const p = db.products.find((x) => x.id === l.productId);
     if (!p) continue;
     p.reserved = Math.max(0, p.reserved - l.quantity);
-    recordStockMovement(db, p.id, 'out', l.quantity, `Sold – ${o.orderNumber}`, o.orderNumber, actor);
+    recordStockMovement(db, p.id, 'out', l.quantity, `Sold – ${o.orderNumber}`, o.orderNumber, actor, { locationId: o.locationId });
   }
   o.status = 'fulfilled';
   audit(db, actor, 'fulfil', 'sales_order', o.orderNumber, `${o.orderNumber} fulfilled`);
@@ -585,7 +967,7 @@ export function cancelSalesOrder(db: BizPilotDB, orderId: string, actor: string,
     const p = db.products.find((x) => x.id === l.productId);
     if (!p) continue;
     if (o.status === 'awaiting_fulfilment') p.reserved = Math.max(0, p.reserved - l.quantity);
-    else recordStockMovement(db, p.id, 'in', l.quantity, `Returned – ${o.orderNumber}`, o.orderNumber, actor);
+    else recordStockMovement(db, p.id, 'in', l.quantity, `Returned – ${o.orderNumber}`, o.orderNumber, actor, { locationId: o.locationId });
   }
   o.status = 'cancelled';
   if (refund) o.paymentStatus = 'refunded';
@@ -934,6 +1316,8 @@ export function applyApprovedAction(db: BizPilotDB, req: ApprovalRequest, actor:
     case 'customer_message': {
       return external.sentTo ? `Message emailed to ${external.sentTo}.` : 'Message approved.';
     }
+    case 'stock_count':
+      return applyStockCount(db, String(p.countId), actor);
     case 'refund': {
       const ret = db.returns.find((x) => x.id === p.returnId);
       if (!ret) throw new OpError('Return case no longer exists.');
@@ -1020,7 +1404,7 @@ export function resolveReturn(
   if (order && refundAmount > order.total) throw new OpError(`Refund is more than the order total of RM${order.total.toFixed(2)}.`);
   const p = ret.productId ? db.products.find((x) => x.id === ret.productId) : undefined;
   if (p && (resolution === 'restock' || resolution === 'quarantine')) {
-    recordStockMovement(db, p.id, 'in', ret.quantity, `Customer return ${ret.returnNumber}${resolution === 'quarantine' ? ' (quarantined)' : ''}`, ret.returnNumber, actor);
+    recordStockMovement(db, p.id, 'in', ret.quantity, `Customer return ${ret.returnNumber}${resolution === 'quarantine' ? ' (quarantined)' : ''}`, ret.returnNumber, actor, { locationId: order?.locationId });
     if (resolution === 'quarantine') p.unavailable = Math.min(p.stock, (p.unavailable || 0) + ret.quantity);
   }
   ret.resolution = resolution;

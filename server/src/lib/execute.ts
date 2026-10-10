@@ -203,6 +203,14 @@ export async function rejectApproval(businessId: string, approvalId: string, act
       const c = db.contentItems.find((x) => x.id === (r.payload as any).contentId);
       if (c && c.status === 'in_review') c.status = 'draft';
     }
+    if (r.type === 'stock_count') {
+      const c = db.stockCounts.find((x) => x.id === (r.payload as any).countId);
+      if (c && c.status === 'submitted') { c.status = 'rejected'; c.decidedAt = new Date().toISOString(); }
+    }
+    if (r.type === 'refund') {
+      const ret = db.returns.find((x) => x.id === (r.payload as any).returnId);
+      if (ret && ret.refundStatus === 'pending_approval') ret.refundStatus = 'none';
+    }
     ops.audit(db, actor, 'reject', 'approval', r.id, `${r.title}${reason ? `: ${reason}` : ''}`);
     return { ok: true };
   });

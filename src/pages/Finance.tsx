@@ -3,6 +3,7 @@ import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
 import { cashPosition, salesLastNDays, upcomingBills } from '@/lib/metrics';
 import { money } from '@/lib/format';
+import { CapitalButton } from '@/components/bizpilot/CapitalDialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PageHeader } from '@/components/layout/AppShell';
 import { SalesTab } from '@/components/bizpilot/finance/SalesTab';
@@ -37,11 +38,12 @@ export function Finance() {
       <PageHeader
         title="Finance"
         subtitle={
-          `Money available: ${money(cashPosition(db).balance)}${db.settings.openingCashDate ? '' : ' (enter your starting capital in Settings)'}` +
+          `Money available: ${money(cashPosition(db).balance)}${db.settings.openingCashDate ? '' : ' (starting capital not set yet)'}` +
           (db.salesOrders.length || db.expenses.length
             ? ` · Last 7 days: ${money(week.revenue)} from ${week.orders} order(s)${bills.length ? ` · ${bills.length} bill(s) due within 7 days` : ''}`
             : '')
         }
+        actions={<CapitalButton />}
       />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>

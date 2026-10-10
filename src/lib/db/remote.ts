@@ -12,7 +12,8 @@ import { defaultSettings, emptyDB, normalizeRecord } from './defaults';
 
 export type CollectionKey = Exclude<keyof BizPilotDB, 'settings'>;
 
-export const TABLES: Record<CollectionKey, { table: string; order?: string; limit?: number }> = {
+/** optional: the table comes from a later SQL file; until it is run the collection loads empty. */
+export const TABLES: Record<CollectionKey, { table: string; order?: string; limit?: number; optional?: boolean }> = {
   products: { table: 'products', order: 'name' },
   stockMovements: { table: 'stock_movements', order: 'date', limit: 3000 },
   suppliers: { table: 'suppliers', order: 'name' },
@@ -25,6 +26,9 @@ export const TABLES: Record<CollectionKey, { table: string; order?: string; limi
   contentItems: { table: 'content_items', order: 'scheduled_date' },
   campaigns: { table: 'campaigns', order: 'name' },
   returns: { table: 'return_cases', order: 'created_at' },
+  locations: { table: 'locations', order: 'created_at', optional: true },
+  transfers: { table: 'stock_transfers', order: 'created_at', optional: true },
+  stockCounts: { table: 'stock_counts', order: 'created_at', optional: true },
   approvals: { table: 'approval_requests', order: 'created_at' },
   auditLog: { table: 'audit_log', order: 'at', limit: 500 },
   notifications: { table: 'notifications', order: 'at', limit: 200 },
@@ -34,7 +38,7 @@ export const TABLES: Record<CollectionKey, { table: string; order?: string; limi
 // Collections displayed newest-first in the UI
 const DESC = new Set<CollectionKey>([
   'stockMovements', 'salesOrders', 'expenses', 'invoices', 'reviews', 'tickets',
-  'approvals', 'auditLog', 'notifications', 'agentTasks', 'purchaseOrders', 'returns',
+  'approvals', 'auditLog', 'notifications', 'agentTasks', 'purchaseOrders', 'returns', 'transfers', 'stockCounts',
 ]);
 
 const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -108,7 +112,12 @@ export async function loadSnapshot(client: SupabaseClient, business: BusinessRow
       if (cfg.order) q = q.order(cfg.order, { ascending: !DESC.has(key), nullsFirst: false });
       if (cfg.limit) q = q.limit(cfg.limit);
       const { data, error } = await q;
-      if (error) throw new Error(`Loading ${cfg.table}: ${error.message}`);
+      if (error) {
+        if (cfg.optional && (error.code === '42P01' || error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message))) {
+          return [key, []] as const;
+        }
+        throw new Error(`Loading ${cfg.table}: ${error.message}`);
+      }
       if (versions) {
         for (const r of (data ?? []) as Record<string, unknown>[]) {
           if (typeof r.row_version === 'number') versions.set(versionKey(cfg.table, String(r.id)), r.row_version);

@@ -39,6 +39,15 @@ const productView = (p: BizPilotDB['products'][number]) => ({
   daysLeft: Number.isFinite(m.daysOfStockLeft(p)) ? m.daysOfStockLeft(p) : null, status: p.status, supplierId: p.supplierId,
 });
 
+/** Find a location by id or name (case-insensitive). */
+function findLocation(db: BizPilotDB, ref: string | undefined) {
+  if (!ref) return null;
+  const r = ref.trim().toLowerCase();
+  const loc = db.locations.find((l) => l.id === ref) ?? db.locations.find((l) => l.name.toLowerCase() === r);
+  if (!loc) throw new ops.OpError(`No location called "${ref}". Use list_locations.`);
+  return loc;
+}
+
 export function buildBizPilotServer(businessId: string, emit: Emit) {
   const level = async () => (await readSnapshot(businessId)).settings.automationLevel;
 
@@ -192,6 +201,47 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         const r = periodReport(db, { from, to, channel, source, productId });
         return { ...r, products: r.products.slice(0, 20), daily: r.days > 62 ? undefined : r.daily };
       })),
+
+    tool('list_locations', 'Shops, branches and warehouses with units and stock value at each, stock per product per location (including in transit), open transfers, open stock counts, and suggested transfers (move stock from a location with spare to one below its reorder level BEFORE buying more).', {},
+      safe(async () => {
+        const db = await readSnapshot(businessId);
+        if (!db.locations.length) return { locations: [], note: 'Single location: all stock is in one place. Use create_location to add shops or warehouses.' };
+        const name = (id: string) => db.locations.find((l) => l.id === id)?.name ?? id;
+        return {
+          locations: db.locations.map((l) => ({ id: l.id, name: l.name, type: l.type, default: l.isDefault, active: l.active,
+            units: db.products.reduce((t, p) => t + ops.stockAt(db, p, l.id), 0), valueAtCost: r2(db.products.reduce((t, p) => t + ops.stockAt(db, p, l.id) * p.unitCost, 0)) })),
+          stock: db.products.filter((p) => p.stock > 0).slice(0, 100).map((p) => {
+            const b = ops.locationBreakdown(db, p);
+            return { sku: p.sku, name: p.name, total: p.stock, reorderLevel: p.reorderLevel, byLocation: Object.fromEntries(Object.entries(b).filter(([, n]) => n).map(([id, n]) => [id === ops.IN_TRANSIT ? 'in transit' : name(id), n])) };
+          }),
+          openTransfers: db.transfers.filter((t) => t.status === 'draft' || t.status === 'in_transit').map((t) => ({ transferNumber: t.transferNumber, from: name(t.fromLocationId), to: name(t.toLocationId), status: t.status, lines: t.lines.map((l) => `${l.quantity}× ${db.products.find((p) => p.id === l.productId)?.name}`) })),
+          openCounts: db.stockCounts.filter((c) => c.status === 'open' || c.status === 'submitted').map((c) => ({ countNumber: c.countNumber, where: c.locationId ? name(c.locationId) : 'all stock', status: c.status })),
+          suggestedTransfers: ops.transferSuggestions(db).map((x) => ({ product: x.product.name, from: x.from.name, to: x.to.name, quantity: x.quantity, reason: x.reason })),
+        };
+      })),
+
+    tool('create_location', 'Add a shop/branch, warehouse or online fulfilment location. The first location becomes the default and receives all current stock.',
+      { name: z.string(), type: z.enum(['store', 'warehouse', 'online']).default('store'), address: z.string().optional() },
+      write(async (a) => withBusiness(businessId, (db) => {
+        const l = ops.createLocation(db, a, ACTOR);
+        return { id: l.id, name: l.name, default: l.isDefault };
+      }))),
+
+    tool('transfer_stock', 'Move stock between two locations. sendNow=true takes it out of the source straight away (in transit until received); false saves a draft. Low-risk, no approval needed.',
+      { from: z.string(), to: z.string(), lines: z.array(z.object({ product: z.string(), quantity: z.number().int().positive() })).min(1), sendNow: z.boolean().default(true), note: z.string().optional() },
+      write(async ({ from, to, lines, sendNow, note }) => withBusiness(businessId, (db) => {
+        const t = ops.createTransfer(db, { fromLocationId: findLocation(db, from)!.id, toLocationId: findLocation(db, to)!.id, note, lines: lines.map((l) => ({ productId: ops.requireProduct(db, l.product).id, quantity: l.quantity })) }, ACTOR, sendNow);
+        emit({ kind: 'artifact', text: `Transfer ${t.transferNumber}: ${from} → ${to} (${t.status.replace('_', ' ')})` });
+        return { transferNumber: t.transferNumber, status: t.status };
+      }))),
+
+    tool('receive_transfer', 'Record a transfer as arrived. Only when someone at the destination confirms it. Give received quantities if fewer arrived; missing units are written off and the owner is told.',
+      { transfer: z.string().describe('Transfer number, e.g. TRF-00001'), received: z.array(z.object({ product: z.string(), quantity: z.number().int().nonnegative() })).optional() },
+      write(async ({ transfer, received }) => withBusiness(businessId, (db) => {
+        const map = received ? Object.fromEntries(received.map((r) => [ops.requireProduct(db, r.product).id, r.quantity])) : 'all' as const;
+        const t = ops.receiveTransfer(db, transfer, map, ACTOR);
+        return { transferNumber: t.transferNumber, status: t.status };
+      }))),
 
     tool('list_suppliers', 'Suppliers with cost, MOQ, lead time and performance from purchase history.', {},
       safe(async () => {
@@ -361,15 +411,15 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       })),
 
     tool('draft_purchase_order', 'Create a draft purchase order and send it to the owner for approval. Unit cost defaults to the product cost. Fails if the business does not have the cash: then order less (fit get_business_overview cash.balance) or tell the owner.',
-      { supplier: z.string(), lines: z.array(z.object({ product: z.string(), quantity: z.number().int().positive(), unitCost: z.number().nonnegative().optional() })).min(1), note: z.string().optional(), expectedDate: z.string().optional() },
-      write(async ({ supplier, lines, note, expectedDate }) => {
+      { supplier: z.string(), lines: z.array(z.object({ product: z.string(), quantity: z.number().int().positive(), unitCost: z.number().nonnegative().optional() })).min(1), note: z.string().optional(), expectedDate: z.string().optional(), deliverTo: z.string().optional().describe('Location name to deliver to (default location if empty)') },
+      write(async ({ supplier, lines, note, expectedDate, deliverTo }) => {
         const req = await withBusiness(businessId, (db) => {
           const s = ops.findSupplier(db, supplier);
           if (!s) throw new ops.OpError(`No supplier matches "${supplier}". Use list_suppliers or create_supplier.`);
           const poLines = lines.map((l) => { const p = ops.requireProduct(db, l.product); return { productId: p.id, quantity: l.quantity, unitCost: l.unitCost ?? p.unitCost }; });
           // Check the money first, so the owner is never asked to approve an order they can't pay for.
           ops.assertCashFor(db, poLines.reduce((t, l) => t + l.quantity * l.unitCost, 0), 'this purchase order');
-          const po = ops.createPurchaseOrder(db, { supplierId: s.id, lines: poLines, note, expectedDate }, ACTOR);
+          const po = ops.createPurchaseOrder(db, { supplierId: s.id, lines: poLines, note, expectedDate, locationId: findLocation(db, deliverTo)?.id ?? null }, ACTOR);
           emit({ kind: 'artifact', text: `Draft ${po.poNumber} for ${s.name}: RM${po.totalCost.toFixed(2)}` });
           return ops.requestApproval(db, {
             type: 'purchase_order', title: `${po.poNumber} to ${s.name} (RM${po.totalCost.toFixed(2)})`,
@@ -423,9 +473,9 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
 
     // ------------------------------------------------------------ write: sales & finance
     tool('record_sale', 'Record a sale (retail walk-in or manual online order). Stock is reserved, or deducted immediately if fulfilNow.',
-      { channel: z.enum(['online', 'retail']), lines: z.array(lineSchema).min(1), customerName: z.string().optional(), customerEmail: z.string().optional(), customerPhone: z.string().optional(), shippingAddress: z.string().optional(), shippingPostcode: z.string().optional(), paymentMethod: z.string().optional(), paymentStatus: z.enum(['paid', 'pending']).default('paid'), fulfilNow: z.boolean().optional() },
-      write(async ({ lines, ...a }) => withBusiness(businessId, (db) => {
-        const so = ops.createSalesOrder(db, { ...a, lines: lines.map((l) => { const p = ops.requireProduct(db, l.product); return { productId: p.id, quantity: l.quantity, unitPrice: l.unitPrice ?? p.price }; }) }, ACTOR);
+      { channel: z.enum(['online', 'retail']), lines: z.array(lineSchema).min(1), customerName: z.string().optional(), customerEmail: z.string().optional(), customerPhone: z.string().optional(), shippingAddress: z.string().optional(), shippingPostcode: z.string().optional(), paymentMethod: z.string().optional(), paymentStatus: z.enum(['paid', 'pending']).default('paid'), fulfilNow: z.boolean().optional(), location: z.string().optional().describe('Shop or warehouse name the goods leave from (default location if empty)') },
+      write(async ({ lines, location, ...a }) => withBusiness(businessId, (db) => {
+        const so = ops.createSalesOrder(db, { ...a, locationId: findLocation(db, location)?.id ?? null, lines: lines.map((l) => { const p = ops.requireProduct(db, l.product); return { productId: p.id, quantity: l.quantity, unitPrice: l.unitPrice ?? p.price }; }) }, ACTOR);
         emit({ kind: 'artifact', text: `Sale ${so.orderNumber}: RM${so.total.toFixed(2)}` });
         return { id: so.id, orderNumber: so.orderNumber, total: so.total, status: so.status };
       }))),

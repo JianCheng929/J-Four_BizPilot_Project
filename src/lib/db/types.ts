@@ -83,12 +83,73 @@ export interface Product {
   status: 'active' | 'discontinued' | 'seasonal' | 'draft';
   // SKU / item ids on external channels, used to match imported orders
   channelSkus: Record<string, string>;
+  /**
+   * Units on hand per location id (blueprint B5). Only used once the business has locations.
+   * Units not listed here count as being at the default location; "__transit__" holds units
+   * on a transfer between locations. The values always add up to `stock`.
+   */
+  locationStock?: Record<string, number>;
+}
+
+/** A shop, branch, warehouse or online fulfilment point (blueprint §3, A5, B5). */
+export interface Location {
+  id: string;
+  name: string;
+  type: 'store' | 'warehouse' | 'online';
+  address: string;
+  isDefault: boolean;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface TransferLine {
+  productId: string;
+  quantity: number;
+  receivedQty?: number;
+}
+
+/** Stock moved between locations: draft → in_transit → received (or cancelled). */
+export interface StockTransfer {
+  id: string;
+  transferNumber: string;
+  fromLocationId: string;
+  toLocationId: string;
+  lines: TransferLine[];
+  status: 'draft' | 'in_transit' | 'received' | 'cancelled';
+  note: string;
+  createdAt: string;
+  shippedAt?: string | null;
+  receivedAt?: string | null;
+  createdBy: string;
+}
+
+export interface StockCountLine {
+  productId: string;
+  expected: number; // system quantity at the location when the count started
+  counted: number | null; // null = not counted yet
+}
+
+/** Blueprint B4: a stock count at one location, with blind counting and approval of differences. */
+export interface StockCount {
+  id: string;
+  countNumber: string;
+  locationId: string;
+  blind: boolean;
+  status: 'open' | 'submitted' | 'approved' | 'rejected' | 'cancelled';
+  lines: StockCountLine[];
+  note: string;
+  createdAt: string;
+  submittedAt?: string | null;
+  decidedAt?: string | null;
+  createdBy: string;
 }
 
 export interface StockMovement {
   id: string;
   productId: string;
-  type: 'in' | 'out' | 'adjustment';
+  type: 'in' | 'out' | 'adjustment' | 'transfer';
+  locationId?: string | null; // where the units came in / went out (from-location for transfers)
+  toLocationId?: string | null; // transfers only
   quantity: number; // signed for adjustments
   reason: string;
   reference: string; // e.g. order/PO number
@@ -141,6 +202,7 @@ export interface PurchaseOrder {
   receivedAt?: string | null;
   sentAt?: string | null;
   note?: string;
+  locationId?: string | null; // deliver to; default location if empty
 }
 
 export interface SalesOrderLine {
@@ -185,6 +247,7 @@ export interface SalesOrder {
   date: string; // ISO
   shipment: Shipment | null;
   invoiceId: string | null;
+  locationId?: string | null; // shop or warehouse the goods leave from; default location if empty
 }
 
 export interface Expense {
@@ -325,7 +388,8 @@ export type ApprovalType =
   | 'shipment_booking'
   | 'stock_adjustment'
   | 'customer_message'
-  | 'refund';
+  | 'refund'
+  | 'stock_count';
 
 export interface ApprovalRequest {
   id: string;
@@ -424,6 +488,9 @@ export interface BizPilotDB {
   contentItems: ContentItem[];
   campaigns: Campaign[];
   returns: ReturnCase[];
+  locations: Location[];
+  transfers: StockTransfer[];
+  stockCounts: StockCount[];
   approvals: ApprovalRequest[];
   auditLog: AuditLogEntry[];
   notifications: AppNotification[];

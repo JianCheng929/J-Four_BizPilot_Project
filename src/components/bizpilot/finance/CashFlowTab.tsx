@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { AlertTriangle, ArrowDownLeft, ArrowUpRight, TrendingUp, Wallet } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
-import { cashFlowForecast, type CashFlowItem } from '@/lib/metrics';
+import { cashFlowForecast, cashLedger, type CashFlowItem } from '@/lib/metrics';
 import { fmtDate, money } from '@/lib/format';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Kpi, Pill, SectionCard } from '../common';
+import { CapitalButton } from '../CapitalDialog';
 
 /** Blueprint D6: cash balance, money expected in and out, and a low-cash warning. */
 export function CashFlowTab() {
@@ -17,8 +18,9 @@ export function CashFlowTab() {
   return (
     <div className="space-y-4">
       {!p.capitalSet && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50/60 px-4 py-3 text-sm">
-          Enter your starting capital (modal) in Settings → Business so the balance below is right.
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50/60 px-4 py-3 text-sm">
+          <span>Enter the money you started the business with (modal) so the balance below is right.</span>
+          <CapitalButton variant="default" />
         </div>
       )}
       {f.lowCash && (
@@ -44,6 +46,7 @@ export function CashFlowTab() {
         <ItemsCard title="Money coming in" empty="No unpaid invoices due in this period." items={f.inItems} />
         <ItemsCard title="Money going out" empty="No unpaid bills, repeating costs or planned purchases in this period." items={f.outItems} />
       </div>
+      <LedgerCard />
       <div className="text-[11px] text-slate-500">
         Actual = from records you entered (invoices, bills, purchase orders). Estimated = repeating costs assumed to come again a month after the last payment, and purchase orders not placed yet. Paid sales are already in the balance.
       </div>
@@ -73,6 +76,42 @@ function ItemsCard({ title, items, empty }: { title: string; items: CashFlowItem
                   {x.label} {x.kind === 'estimated' && <Pill tone="slate">estimated</Pill>}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{money(x.amount)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </SectionCard>
+  );
+}
+
+/** Every record behind "Money available now", so the owner can check the number. */
+function LedgerCard() {
+  const { db } = useBizPilot();
+  const rows = cashLedger(db);
+  const total = rows.reduce((s, r) => s + r.amount, 0);
+  return (
+    <SectionCard
+      title="Where “money available now” comes from"
+      description={`${rows.length} record(s) · total ${money(total)}. Buying stock is money out here, but it is not an expense in P&L or Reports: it counts as cost of goods only when the stock is sold.`}
+    >
+      {rows.length === 0 ? (
+        <div className="py-4 text-center text-sm text-slate-500">No capital, paid sales, paid expenses or placed purchase orders yet.</div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Date</TableHead>
+              <TableHead>Record</TableHead>
+              <TableHead className="text-right">In / out</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.slice(0, 200).map((r, i) => (
+              <TableRow key={i}>
+                <TableCell className="whitespace-nowrap text-xs">{r.date ? fmtDate(r.date) : '—'}</TableCell>
+                <TableCell className="text-sm">{r.label}</TableCell>
+                <TableCell className={`text-right tabular-nums ${r.amount < 0 ? 'text-red-600' : 'text-teal-700'}`}>{r.amount > 0 ? '+' : ''}{money(r.amount)}</TableCell>
               </TableRow>
             ))}
           </TableBody>

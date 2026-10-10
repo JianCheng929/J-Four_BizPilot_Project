@@ -51,6 +51,8 @@ export interface PeriodReport {
   bySource: { key: string; orders: number; revenue: number }[];
   products: ProductRow[];
   expensesByCategory: { category: string; amount: number; unpaid: number }[];
+  /** Cash spent on stock in the period (purchase orders placed). Not an expense: it becomes cost of goods when sold. */
+  stockPurchases: { count: number; amount: number };
   daily: { date: string; revenue: number; orders: number; grossProfit: number }[];
   notes: string[];
   generatedAt: string;
@@ -174,6 +176,13 @@ export function periodReport(db: BizPilotDB, filter: ReportFilter): PeriodReport
     }
   }
 
+  const placed = f.productId ? [] : db.purchaseOrders.filter((p) => {
+    if (!['ordered', 'partially_received', 'received'].includes(p.status)) return false;
+    const t = new Date(p.sentAt || p.createdAt).getTime();
+    return t >= fromT && t <= toT;
+  });
+  const stockPurchases = { count: placed.length, amount: r2(placed.reduce((s, p) => s + p.totalCost, 0)) };
+
   const daily: PeriodReport['daily'] = [];
   for (let t = fromT; t <= toT && daily.length < 400; t += DAY) {
     const d = collect.daily.get(ymd(t));
@@ -186,6 +195,7 @@ export function periodReport(db: BizPilotDB, filter: ReportFilter): PeriodReport
     'Cancelled and refunded orders are excluded. Revenue is the order total as recorded.',
     'Cost of goods uses each product\'s current unit cost, not the cost at the time of sale.',
   ];
+  if (stockPurchases.count) notes.push(`Cash spent on stock in this period: ${stockPurchases.count} purchase order(s), RM${stockPurchases.amount.toFixed(2)}. This lowers money available (Finance → Cash flow) but is not an expense here; it becomes cost of goods when the stock sells.`);
   if (f.productId) notes.push('Product filter: revenue is that product\'s line amounts; operating expenses are not allocated to products, so net profit equals gross profit.');
   if (collect.unmatched.lines) notes.push(`Missing data: ${collect.unmatched.lines} order line(s) are not linked to a product, so their cost is counted as RM0.`);
   if (collect.noCost.size) notes.push(`Missing data: no unit cost set for ${[...collect.noCost].slice(0, 5).join(', ')}${collect.noCost.size > 5 ? ` and ${collect.noCost.size - 5} more` : ''}, so their margin is overstated.`);
@@ -206,6 +216,7 @@ export function periodReport(db: BizPilotDB, filter: ReportFilter): PeriodReport
     byChannel: [...collect.channel.entries()].map(([key, v]) => ({ key, orders: v.orders, revenue: r2(v.revenue) })),
     bySource: [...collect.source.entries()].map(([key, v]) => ({ key, orders: v.orders, revenue: r2(v.revenue) })).sort((a, b) => b.revenue - a.revenue),
     products,
+    stockPurchases,
     expensesByCategory: [...exp.entries()].map(([category, v]) => ({ category, amount: r2(v.amount), unpaid: r2(v.unpaid) })).sort((a, b) => b.amount - a.amount),
     daily,
     notes,
@@ -230,6 +241,7 @@ export function reportToCsv(r: PeriodReport, businessName: string): string {
       ['Net profit (RM)', c.netProfit, p.netProfit], ['Average order (RM)', c.avgOrderValue, p.avgOrderValue]]),
     rows([['Product', 'SKU', 'Units', 'Revenue (RM)', 'Cost (RM)', 'Gross profit (RM)', 'Margin %'], ...r.products.map((x) => [x.name, x.sku, x.units, x.revenue, x.cogs, x.grossProfit, x.marginPct])]),
     rows([['Expense category', 'Amount (RM)', 'Unpaid (RM)'], ...r.expensesByCategory.map((x) => [x.category, x.amount, x.unpaid])]),
+    rows([['Cash spent on stock (not an expense)', 'Purchase orders', 'Amount (RM)'], ['', r.stockPurchases.count, r.stockPurchases.amount]]),
     rows([['Date', 'Orders', 'Revenue (RM)', 'Gross profit (RM)'], ...r.daily.map((x) => [x.date, x.orders, x.revenue, x.grossProfit])]),
     rows([['Notes'], ...r.notes.map((n) => [n])]),
   ].join('\r\n\r\n');

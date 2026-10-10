@@ -1,10 +1,12 @@
 export function money(n: number, currency = 'RM'): string {
-  return `${currency}${n.toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const v = Math.abs(n).toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${n < -0.004 ? '−' : ''}${currency}${v}`;
 }
 
 export function moneyShort(n: number, currency = 'RM'): string {
-  if (Math.abs(n) >= 1000) return `${currency}${(n / 1000).toFixed(1)}k`;
-  return `${currency}${n.toFixed(0)}`;
+  const sign = n < 0 ? '−' : '';
+  if (Math.abs(n) >= 1000) return `${sign}${currency}${(Math.abs(n) / 1000).toFixed(1)}k`;
+  return `${sign}${currency}${Math.abs(n).toFixed(0)}`;
 }
 
 export function fmtDate(iso: string): string {

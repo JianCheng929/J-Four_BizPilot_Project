@@ -32,6 +32,8 @@ import { EmptyState, Pill, SectionCard, primaryBtn } from '@/components/bizpilot
 import { ProductDialog } from '@/components/bizpilot/ProductDialog';
 import { StockDialog, type StockMode } from '@/components/bizpilot/StockDialog';
 import { draftPOForApproval } from '@/components/bizpilot/actions';
+import { LocationsTab } from '@/components/bizpilot/LocationsTab';
+import { StockCountsTab } from '@/components/bizpilot/StockCountsTab';
 
 function stockBadge(p: Product, lowDays: number) {
   const avail = availableStock(p);
@@ -208,6 +210,10 @@ export function Inventory() {
           <TabsTrigger value="health">
             Stock health{alerts.some((a) => a.severity !== 'info') && <Badge className="ml-1.5 h-4 bg-red-500 px-1.5 text-[10px]">{alerts.filter((a) => a.severity !== 'info').length}</Badge>}
           </TabsTrigger>
+          <TabsTrigger value="locations">
+            Locations &amp; transfers{db.transfers.some((t) => t.status === 'in_transit') && <Badge className="ml-1.5 h-4 bg-blue-500 px-1.5 text-[10px]">{db.transfers.filter((t) => t.status === 'in_transit').length}</Badge>}
+          </TabsTrigger>
+          <TabsTrigger value="counts">Stock counts</TabsTrigger>
           <TabsTrigger value="movements">Movement history</TabsTrigger>
           <TabsTrigger value="reorder">
             Reorder{suggestions.length > 0 && <Badge className="ml-1.5 h-4 bg-amber-500 px-1.5 text-[10px]">{suggestions.length}</Badge>}
@@ -465,19 +471,21 @@ export function Inventory() {
                 <TableBody>
                   {movements.slice(0, 300).map((m) => {
                     const p = db.products.find((x) => x.id === m.productId);
-                    const signed = m.type === 'out' ? -m.quantity : m.quantity;
+                    const signed = m.type === 'out' ? -m.quantity : m.type === 'transfer' ? 0 : m.quantity;
                     return (
                       <TableRow key={m.id}>
                         <TableCell className="whitespace-nowrap text-xs">{fmtDateTime(m.date)}</TableCell>
                         <TableCell>{p?.name ?? <span className="text-slate-400">deleted product</span>}</TableCell>
                         <TableCell>
-                          <Pill tone={m.type === 'in' ? 'green' : m.type === 'out' ? 'red' : 'amber'}>{m.type}</Pill>
+                          <Pill tone={m.type === 'in' ? 'green' : m.type === 'out' ? 'red' : m.type === 'transfer' ? 'blue' : 'amber'}>{m.type}</Pill>
                         </TableCell>
-                        <TableCell className={cn('text-right font-medium', signed < 0 ? 'text-red-600' : 'text-teal-700')}>
-                          {signed > 0 ? '+' : ''}
-                          {signed}
+                        <TableCell className={cn('text-right font-medium', signed < 0 ? 'text-red-600' : m.type === 'transfer' ? 'text-slate-600' : 'text-teal-700')}>
+                          {m.type === 'transfer' ? `${m.quantity} moved` : `${signed > 0 ? '+' : ''}${signed}`}
                         </TableCell>
-                        <TableCell className="text-sm">{m.reason}</TableCell>
+                        <TableCell className="text-sm">
+                          {m.reason}
+                          {m.locationId && m.type !== 'transfer' && <span className="text-xs text-slate-400"> · {db.locations.find((l) => l.id === m.locationId)?.name ?? (m.locationId === ops.IN_TRANSIT ? 'in transit' : '')}</span>}
+                        </TableCell>
                         <TableCell className="text-xs text-slate-500">{m.reference}</TableCell>
                         <TableCell className="text-xs text-slate-500">{m.actor}</TableCell>
                       </TableRow>
@@ -495,6 +503,9 @@ export function Inventory() {
             </SectionCard>
           )}
         </TabsContent>
+
+        <TabsContent value="locations" className="mt-4"><LocationsTab /></TabsContent>
+        <TabsContent value="counts" className="mt-4"><StockCountsTab /></TabsContent>
 
         <TabsContent value="reorder" className="mt-4 space-y-4">
           {suggestions.length === 0 ? (

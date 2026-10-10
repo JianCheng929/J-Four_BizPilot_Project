@@ -22,6 +22,7 @@ const TYPE_LABEL: Record<ApprovalType, string> = {
   stock_adjustment: 'Stock adjustment',
   customer_message: 'Customer message',
   refund: 'Refund',
+  stock_count: 'Stock count',
 };
 
 /** Live preview of the record an approval will change. */

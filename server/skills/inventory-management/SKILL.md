@@ -91,4 +91,6 @@ Answer in at most 10 lines:
 2. **Waiting for your approval:** each PO and stock correction.
 3. **Watch:** slow or overstocked items with your one-line suggestion.
 
+If the business has more than one location (list_locations), check suggestedTransfers first: move spare stock with transfer_stock before drafting a PO, and pass deliverTo on POs so stock lands where it is short.
+
 Never ask "should I reorder?". Draft the PO and the approval step does the asking.

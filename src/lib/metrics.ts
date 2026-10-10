@@ -252,6 +252,27 @@ export function cashPosition(db: BizPilotDB): CashPosition {
   return { capital, capitalSet: Boolean(db.settings.openingCashDate), salesIn, expensesOut, purchasesOut, balance };
 }
 
+export interface CashEntry {
+  date: string;
+  label: string;
+  amount: number; // + money in, − money out
+  kind: 'capital' | 'sale' | 'expense' | 'purchase';
+}
+
+/** Every record behind cashPosition().balance, newest first, so the number can be checked. */
+export function cashLedger(db: BizPilotDB): CashEntry[] {
+  const out: CashEntry[] = [];
+  const capital = Number(db.settings.openingCash) || 0;
+  if (capital) out.push({ date: db.settings.openingCashDate || '', label: 'Starting capital (modal)', amount: capital, kind: 'capital' });
+  for (const o of paidOrders(db.salesOrders)) out.push({ date: o.date, label: `Sale ${o.orderNumber}${o.customerName ? ` · ${o.customerName}` : ''}`, amount: o.total, kind: 'sale' });
+  for (const e of db.expenses.filter((x) => x.paid)) out.push({ date: e.date, label: `Expense · ${e.category}: ${e.description}`, amount: -e.amount, kind: 'expense' });
+  for (const p of db.purchaseOrders.filter((x) => ['ordered', 'partially_received', 'received'].includes(x.status))) {
+    const sup = db.suppliers.find((x) => x.id === p.supplierId)?.name;
+    out.push({ date: p.sentAt || p.createdAt, label: `Stock purchase ${p.poNumber}${sup ? ` · ${sup}` : ''} (${p.status.replace('_', ' ')})`, amount: -p.totalCost, kind: 'purchase' });
+  }
+  return out.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
 // ---------------------------------------------------------------- inventory health (blueprint B2, B3, A5)
 
 const EXPIRY_WARN_DAYS = 30;

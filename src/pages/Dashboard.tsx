@@ -15,12 +15,16 @@ import {
   Sparkles,
   TrendingUp,
   Truck,
+  Wallet,
+  Boxes,
 } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
 import { api } from '@/lib/api';
 import * as ops from '@/lib/ops';
 import {
   awaitingFulfilment,
+  cashPosition,
+  stockValuation,
   dailySalesSeries,
   grossProfitLastNDays,
   latePurchaseOrders,
@@ -34,6 +38,7 @@ import { Button } from '@/components/ui/button';
 import { PageHeader, type PageKey } from '@/components/layout/AppShell';
 import { cn } from '@/lib/utils';
 import { Kpi, SectionCard, primaryBtn } from '@/components/bizpilot/common';
+import { CapitalDialog } from '@/components/bizpilot/CapitalDialog';
 
 const ONLINE = '#0d9488';
 const RETAIL = '#d97706';
@@ -85,6 +90,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
   const awaiting = awaitingFulfilment(db);
   const reorder = ops.reorderSuggestions(db);
   const latePOs = latePurchaseOrders(db);
+  const [capitalOpen, setCapitalOpen] = useState(false);
+  const cash = cashPosition(db);
+  const stockValue = stockValuation(db);
   const overdue = overdueInvoices(db);
   const overdueTotal = overdue.reduce((s, i) => s + i.total, 0);
   const bills = upcomingBills(db, 7);
@@ -101,7 +109,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
   const workbuddyDone = db.agentTasks.length > 0;
   const channelDone =
     isConnected((id) => MARKETPLACE_IDS.includes(id)) || db.salesOrders.some((o) => ['shopee', 'lazada', 'tiktok_shop'].includes(o.source));
-  const checklist = [
+  const checklist: { done: boolean; label: string; hint: string; page: PageKey; cta: string; onClick?: () => void }[] = [
+    { done: Boolean(db.settings.openingCashDate), label: 'Set your starting capital (modal)', hint: 'The money you put into the business, so BizPilot can track what is left', page: 'finance' as PageKey, cta: 'Set capital', onClick: () => setCapitalOpen(true) },
     { done: hasProducts, label: 'Add your products', hint: 'Cost, price, opening stock and reorder level', page: 'inventory' as PageKey, cta: 'Add products' },
     { done: workbuddyDone, label: 'Give WorkBuddy its first goal', hint: 'Try "Morning briefing" in the Command Centre', page: 'command' as PageKey, cta: 'Open Command Centre' },
     { done: channelDone, label: 'Connect a sales channel', hint: 'Shopee, Lazada or TikTok Shop', page: 'settings' as PageKey, cta: 'Open Settings' },
@@ -179,6 +188,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
   return (
     <div>
       <PageHeader title="Dashboard" subtitle={`${db.settings.name || 'Your business'} · one view of your business health`} />
+      {capitalOpen && <CapitalDialog open={capitalOpen} onOpenChange={setCapitalOpen} />}
 
       <div className="mb-5 rounded-xl border border-teal-700/20 bg-gradient-to-br from-teal-700/[0.06] to-transparent p-4">
         <div className="flex gap-3">
@@ -198,7 +208,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
       </div>
 
       {(hasProducts || hasSales) && (
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-6">
           <Kpi icon={ShoppingCart} label="Today's sales" value={money(today.revenue)} hint={`${today.orders} order(s)`} onClick={() => onNavigate('finance')} />
           <Kpi icon={TrendingUp} label="Sales (7 days)" value={money(week.revenue)} hint={`${week.orders} order(s)`} onClick={() => onNavigate('finance')} />
           <Kpi icon={CircleDollarSign} label="Gross profit (7 days)" value={money(gp7)} hint="revenue − cost of goods" onClick={() => onNavigate('finance')} />
@@ -209,6 +219,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
           <Kpi icon={AlarmClock} label="Overdue invoices" value={money(overdueTotal)} hint={`${overdue.length} invoice(s)`} tone={overdue.length ? 'red' : 'slate'} onClick={() => onNavigate('finance')} />
           <Kpi icon={CalendarClock} label="Bills due (7 days)" value={money(billsTotal)} hint={`${bills.length} bill(s)`} tone={bills.length ? 'amber' : 'slate'} onClick={() => onNavigate('finance')} />
           <Kpi icon={Truck} label="Late deliveries" value={String(latePOs.length)} hint="purchase orders" tone={latePOs.length ? 'amber' : 'slate'} onClick={() => onNavigate('supplychain')} />
+          <Kpi icon={Wallet} label="Money available" value={money(cash.balance)} hint={cash.capitalSet ? `after ${money(cash.purchasesOut)} stock bought` : 'set starting capital in Settings'} tone={cash.balance < 0 ? 'red' : 'teal'} onClick={() => (cash.capitalSet ? onNavigate('finance') : setCapitalOpen(true))} />
+          <Kpi icon={Boxes} label="Stock value" value={money(stockValue.totalCost)} hint={`${stockValue.units} units at cost`} tone="slate" onClick={() => onNavigate('inventory')} />
         </div>
       )}
 
@@ -250,7 +262,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
                       <div className="text-xs text-slate-500">{c.hint}</div>
                     </div>
                     {!c.done && (
-                      <Button size="sm" className={primaryBtn} onClick={() => onNavigate(c.page)}>
+                      <Button size="sm" className={primaryBtn} onClick={() => (c.onClick ? c.onClick() : onNavigate(c.page))}>
                         {c.cta}
                       </Button>
                     )}

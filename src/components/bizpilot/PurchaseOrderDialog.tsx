@@ -30,6 +30,8 @@ export function PurchaseOrderDialog({
   const [lines, setLines] = useState<Line[]>([]);
   const [expected, setExpected] = useState('');
   const [note, setNote] = useState('');
+  const activeLocations = db.locations.filter((l) => l.active);
+  const [locationId, setLocationId] = useState<string>(() => db.locations.find((l) => l.isDefault && l.active)?.id ?? '');
   const [error, setError] = useState<string | null>(null);
 
   const supplier = db.suppliers.find((s) => s.id === supplierId);
@@ -71,6 +73,7 @@ export function PurchaseOrderDialog({
       lines: parsed.map((l) => ({ productId: l.productId, quantity: Number(l.quantity), unitCost: Number(l.unitCost) })),
       note: note.trim(),
       expectedDate: expected ? fromDateInput(expected) : undefined,
+      locationId: locationId || null,
     };
     const res = forApproval
       ? run((d, a) => draftPOForApproval(d, input, a), 'PO sent to Approvals')
@@ -98,6 +101,11 @@ export function PurchaseOrderDialog({
             <Field label="Expected delivery" hint={supplier ? `Lead time ${supplier.leadTimeDays} days` : undefined}>
               <Input type="date" value={expected} onChange={(e) => setExpected(e.target.value)} />
             </Field>
+            {activeLocations.length > 1 && (
+              <Field label="Deliver to">
+                <SimpleSelect value={locationId} onChange={setLocationId} options={activeLocations.map((l) => ({ value: l.id, label: l.name }))} />
+              </Field>
+            )}
           </div>
           <div className="rounded-md border border-slate-200">
             <div className="grid grid-cols-[1fr_90px_110px_90px_32px] gap-2 border-b bg-slate-50 px-3 py-2 text-[11px] font-medium text-slate-500">

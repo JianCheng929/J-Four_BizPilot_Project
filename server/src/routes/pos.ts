@@ -49,7 +49,8 @@ async function businessFromToken(req: Request): Promise<string> {
 /**
  * POST /api/pos/sales
  * { "externalId": "till1-000123", "items": [{ "sku" | "barcode": "...", "quantity": 2, "unitPrice": 12.9 }],
- *   "paymentMethod": "cash", "customerName": "Walk-in", "date": "2026-10-10T08:00:00Z" }
+ *   "paymentMethod": "cash", "customerName": "Walk-in", "date": "2026-10-10T08:00:00Z",
+ *   "location": "KK shop" }   (optional: shop name or id the sale happened at)
  */
 pos.post('/sales', handle(async (req) => {
   const businessId = await businessFromToken(req);
@@ -65,7 +66,11 @@ pos.post('/sales', handle(async (req) => {
       const p = ops.requireProduct(db, ref);
       return { productId: p.id, quantity: Number(it.quantity) || 1, unitPrice: it.unitPrice != null ? Number(it.unitPrice) : p.price };
     });
+    const ref = b.location ? String(b.location).trim().toLowerCase() : '';
+    const loc = ref ? db.locations.find((l) => l.id === b.location || l.name.toLowerCase() === ref) : undefined;
+    if (ref && !loc) throw new HttpError(400, `Unknown location "${b.location}".`);
     const so = ops.createSalesOrder(db, {
+      locationId: loc?.id ?? null,
       channel: 'retail', source: 'pos', externalId: b.externalId ? String(b.externalId) : null, lines,
       customerName: b.customerName, paymentMethod: b.paymentMethod ?? 'cash', paymentStatus: 'paid', date: b.date, fulfilNow: true,
     }, 'POS');

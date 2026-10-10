@@ -240,6 +240,12 @@ export function Reports({ onNavigate }: { onNavigate?: (p: PageKey) => void }) {
             </SectionCard>
           )}
 
+          {report.stockPurchases.count > 0 && (
+            <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">
+              <span className="font-semibold">Cash spent on stock: {money(report.stockPurchases.amount)}</span> across {report.stockPurchases.count} purchase order(s) placed in this period. It lowers money available but is not an expense in this P&amp;L; it becomes cost of goods when the stock sells.
+            </div>
+          )}
+
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
             <div className="mb-1 font-semibold text-slate-700">About this report</div>
             <ul className="list-disc space-y-0.5 pl-4">

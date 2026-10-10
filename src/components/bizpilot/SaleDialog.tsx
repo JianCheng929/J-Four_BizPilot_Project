@@ -37,6 +37,8 @@ export function SaleDialog({
   const [paymentStatus, setPaymentStatus] = useState<'paid' | 'pending'>('paid');
   const [customer, setCustomer] = useState({ name: '', email: '', phone: '', address: '', postcode: '' });
   const [error, setError] = useState<string | null>(null);
+  const [locationId, setLocationId] = useState<string>(() => db.locations.find((l) => l.isDefault && l.active)?.id ?? '');
+  const activeLocations = db.locations.filter((l) => l.active);
 
   useEffect(() => {
     if (!open) return;
@@ -108,6 +110,7 @@ export function SaleDialog({
                 customerPhone: customer.phone.trim(),
                 customerEmail: customer.email.trim(),
                 fulfilNow: true,
+                locationId: locationId || null,
               }
             : {
                 channel: 'online',
@@ -120,6 +123,7 @@ export function SaleDialog({
                 customerPhone: customer.phone.trim(),
                 shippingAddress: customer.address.trim(),
                 shippingPostcode: customer.postcode.trim(),
+                locationId: locationId || null,
               },
           a,
         ),
@@ -146,6 +150,11 @@ export function SaleDialog({
             <TabsTrigger value="online">Online order</TabsTrigger>
           </TabsList>
         </Tabs>
+        {activeLocations.length > 1 && (
+          <Field label={channel === 'retail' ? 'Sold at' : 'Ships from'}>
+            <SimpleSelect value={locationId} onChange={setLocationId} options={activeLocations.map((l) => ({ value: l.id, label: l.name }))} />
+          </Field>
+        )}
 
         {sellable.length === 0 ? (
           <div className="rounded-md bg-slate-50 p-4 text-sm text-slate-600">Add active products in Inventory before recording sales.</div>

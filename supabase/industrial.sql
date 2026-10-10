@@ -11,7 +11,60 @@
 --      or oversell stock. Either every change in a save lands, or none does.
 --   3. The audit log can only be added to, never edited or deleted.
 --   4. Only owners and managers can decide approvals; stock can't go negative.
+--   5. Multi-location stock: shops, warehouses, transfers and stock counts.
 -- ============================================================
+
+-- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
+create table if not exists locations (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  name text not null,
+  type text default 'store' check (type in ('store','warehouse','online')),
+  address text default '',
+  is_default boolean default false,
+  active boolean default true,
+  created_at timestamptz default now(),
+  unique (business_id, name)
+);
+create table if not exists stock_transfers (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  transfer_number text not null,
+  from_location_id text not null,
+  to_location_id text not null,
+  lines jsonb not null default '[]'::jsonb,
+  status text default 'draft' check (status in ('draft','in_transit','received','cancelled')),
+  note text default '',
+  created_at timestamptz default now(),
+  shipped_at timestamptz,
+  received_at timestamptz,
+  created_by text default '',
+  unique (business_id, transfer_number)
+);
+create table if not exists stock_counts (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  count_number text not null,
+  location_id text default '',
+  blind boolean default false,
+  status text default 'open' check (status in ('open','submitted','approved','rejected','cancelled')),
+  lines jsonb not null default '[]'::jsonb,
+  note text default '',
+  created_at timestamptz default now(),
+  submitted_at timestamptz,
+  decided_at timestamptz,
+  created_by text default '',
+  unique (business_id, count_number)
+);
+alter table products add column if not exists location_stock jsonb default '{}'::jsonb;
+alter table stock_movements add column if not exists location_id text;
+alter table stock_movements add column if not exists to_location_id text;
+alter table sales_orders add column if not exists location_id text;
+alter table purchase_orders add column if not exists location_id text;
+alter table stock_movements drop constraint if exists stock_movements_type_check;
+alter table stock_movements add constraint stock_movements_type_check check (type in ('in','out','adjustment','transfer'));
+create index if not exists idx_transfers_biz on stock_transfers (business_id, created_at desc);
+create index if not exists idx_counts_biz on stock_counts (business_id, created_at desc);
 
 -- 1. Team members ------------------------------------------------------------------
 create table if not exists business_members (
@@ -108,7 +161,7 @@ begin
   foreach t in array array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -139,7 +192,7 @@ begin
   foreach t in array array[
     'businesses','products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts'
   ]
   loop
     execute format('alter table %I add column if not exists row_version int not null default 0', t);
@@ -201,7 +254,7 @@ declare
   allowed constant text[] := array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases'];
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts'];
   c jsonb;
   tbl text;
   op text;

@@ -41,7 +41,7 @@ export const TEAM: TeamMember[] = [
     skills: ['inventory-management', 'business-setup'],
     tools: [
       'create_product', 'update_product', 'create_variants', 'set_batch_tracking', 'hold_stock', 'record_stock_movement', 'request_stock_adjustment',
-      'request_price_change', 'create_supplier', 'update_supplier', 'draft_purchase_order', 'receive_purchase_order', 'cancel_purchase_order',
+      'request_price_change', 'create_supplier', 'update_supplier', 'draft_purchase_order', 'receive_purchase_order', 'cancel_purchase_order', 'record_purchase_already_made',
       'set_recipe', 'plan_production', 'buy_production_materials', 'start_production', 'complete_production', 'cancel_production',
       'create_location', 'update_location', 'transfer_stock', 'ship_transfer', 'receive_transfer', 'cancel_transfer', 'stock_count',
       'set_bin', 'create_staff_task', 'update_staff_task',

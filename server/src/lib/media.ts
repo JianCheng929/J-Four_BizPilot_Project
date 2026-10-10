@@ -4,11 +4,11 @@ import { klingConfigured, klingImage } from './kling.ts';
 /**
  * AI image generation for marketing (blueprint C2/C5).
  *
- * Uses the first image model that has a key on the server:
- *   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN   Cloudflare Workers AI,
- *                    FLUX.1 schnell (free daily allowance, square images)
+ * Tries, in this order, the image models that have a key on the server:
  *   GEMINI_API_KEY   Google Gemini image model (default gemini-2.5-flash-image)
  *   OPENAI_API_KEY   OpenAI gpt-image-1
+ *   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN   Cloudflare Workers AI,
+ *                    FLUX.1 schnell (free daily allowance, square images)
  *   KLING_ACCESS_KEY + KLING_SECRET_KEY   Kling AI (Kolors)
  *   otherwise        Pollinations (free, low quality, often rate-limited;
  *                    POLLINATIONS_TOKEN raises the limit)
@@ -111,9 +111,10 @@ async function pollinations(prompt: string, aspect: Aspect): Promise<Raw> {
 
 export function imageEngines(): string[] {
   const e: string[] = [];
-  if (cloudflareConfigured()) e.push('cloudflare');
+  // Best quality first; when one fails (quota, outage) the next one is tried.
   if (process.env.GEMINI_API_KEY) e.push('gemini');
   if (process.env.OPENAI_API_KEY) e.push('openai');
+  if (cloudflareConfigured()) e.push('cloudflare');
   if (klingConfigured()) e.push('kling');
   e.push('pollinations');
   return e;

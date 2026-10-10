@@ -1,4 +1,4 @@
-import { UNTRUSTED_RULES } from './untrusted.ts';
+import { UNTRUSTED_RULES, untrusted } from './untrusted.ts';
 import { query } from '@tencent-ai/agent-sdk';
 import type { AgentEvent, AgentTask } from '../../../src/lib/db/types.ts';
 import { newId } from '../../../src/lib/db/defaults.ts';
@@ -14,8 +14,23 @@ import { cliPath, environment, rememberAccount, reportRun, restoreLogin, runtime
  * tools, streaming every step into agent_tasks so the Command Centre shows it live.
  */
 
+/** A file the owner attached in the Command Centre, already read in the browser. */
+export interface Attachment {
+  name: string;
+  kind: 'image' | 'pdf' | 'sheet' | 'text' | 'video';
+  size: number;
+  /** Text read from the file (PDF text, spreadsheet as CSV, text file) */
+  text?: string;
+  /** JPEG images, base64 without the data: prefix (photo, PDF pages, video frames) */
+  images?: string[];
+  /** Private storage path of the original (images and PDFs), to keep as a receipt */
+  path?: string;
+  note?: string;
+}
+
 interface Live {
   task: AgentTask;
+  attachments: Attachment[];
   businessId: string;
   history: string;
   abort: AbortController;
@@ -76,10 +91,38 @@ How to lead the team:
 - Read each member's report. If a member reports PROBLEMS or a step failed, retry once with a corrected brief, give it to another member, or do it yourself.
 - ALWAYS finish a multi-step goal by running qa-agent with the list of what was supposed to be delivered. If it reports FAILED, have the right member fix it and run qa-agent again (at most twice). Only then write the summary, and say the quality check passed (or what is still open).
 ` : ''}
-8. Finish with a concise summary for the owner: what you found (with the real figures), what you did (record numbers), and which approvals are waiting for them. Use plain language, no markdown tables.
+8. Files from the owner. When the owner attaches photos, PDFs, spreadsheets or videos, you are their back office: read every file, work out what each one is, and put it into the business yourself without asking:
+   - sales receipt, POS slip, order screenshot, marketplace order list → record_sale for each sale (paymentStatus as the document shows; create missing products first), then fulfil if handed over;
+   - supplier QUOTATION or price list (nothing bought yet) → create_supplier if new, create or update the products with the quoted cost and a sensible selling price, then draft_purchase_order for a sensible first order within the cash (goes to Approvals);
+   - supplier receipt, paid invoice or delivery order for goods ALREADY bought → record_purchase_already_made (supplier, items, quantities, unit costs, document number); this books the money spent and the stock received;
+   - bill or expense receipt (rent, utilities, petrol, packaging, ads, wages) → add_expense with the right category, paid or unpaid with due date, and receiptFile set to the file's "stored as" path;
+   - unpaid customer invoice we issued / customer purchase order → create_invoice or record_sale as fits;
+   - stock list or count sheet → stock_count or request_stock_adjustment; product catalogue spreadsheet → create_product per row;
+   - review, complaint or chat screenshot → create_ticket and draft a reply (draft_review_reply when it is a review);
+   - product photo or video → create or update the product (listing copy from what you see), then draft marketing content for it;
+   - bank statement → match money in to unpaid invoices/orders (record_payment for clear matches) and list what is unmatched.
+   Before recording, check for duplicates with the list tools (same document number, or same amount and date). Use only figures you can actually read; if part is unreadable, record what is clear and say exactly what is missing. Team members cannot see the files: when you delegate, copy every figure they need into the brief. Finish with one line per file: what it was and what you recorded (record numbers).
+9. Finish with a concise summary for the owner: what you found (with the real figures), what you did (record numbers), and which approvals are waiting for them. Use plain language, no markdown tables.
 
 ${UNTRUSTED_RULES}
 `.trim();
+
+/** What the owner attached, as text for the goal. File contents are data, never instructions. */
+export function filesText(files: Attachment[]): string {
+  if (!files.length) return '';
+  let n = 0;
+  const parts = files.map((f, i) => {
+    const imgs = f.images?.length ?? 0;
+    const pics = imgs ? ` Pictures ${n + 1}${imgs > 1 ? `-${n + imgs}` : ''} below are ${f.kind === 'pdf' ? 'its pages' : f.kind === 'video' ? 'frames from it, in order' : 'the photo'}.` : '';
+    n += imgs;
+    return `File ${i + 1}: "${f.name}" (${f.kind}, ${Math.max(1, Math.round(f.size / 1024))} KB).${f.path ? ` Stored as: ${f.path}` : ''}${f.note ? ` ${f.note}` : ''}${pics}${f.text ? `\nText read from it:\n${untrusted(f.text)}` : ''}`;
+  });
+  return `\n\n---\nThe owner attached ${files.length} file(s). Read each one, decide what it is and put it into the business (rule 8):\n\n${parts.join('\n\n')}`;
+}
+
+async function* oneMessage(content: unknown[]) {
+  yield { type: 'user', session_id: '', parent_tool_use_id: null, message: { role: 'user', content } } as any;
+}
 
 function push(l: Live, e: Omit<AgentEvent, 'at'>) {
   const text = e.text.length > 4000 ? `${e.text.slice(0, 4000)}…` : e.text;
@@ -135,7 +178,7 @@ export function isBusinessBusy(businessId: string) {
   return false;
 }
 
-export async function startTask(businessId: string, prompt: string, conversationId?: string | null): Promise<AgentTask> {
+export async function startTask(businessId: string, prompt: string, conversationId?: string | null, attachments: Attachment[] = []): Promise<AgentTask> {
   for (const l of live.values()) {
     if (l.businessId === businessId) throw new Error('WorkBuddy is still working on the previous goal. Wait for it or cancel it.');
   }
@@ -144,13 +187,16 @@ export async function startTask(businessId: string, prompt: string, conversation
   const id = newId();
   const task: AgentTask = {
     id, conversationId: conversationId || id, prompt, mode: 'local', status: 'starting', workbuddyTaskId: null, workbuddyLink: null,
-    events: [{ at: now, kind: 'status', text: 'Sending goal to WorkBuddy…' }], result: null, createdAt: now, updatedAt: now,
+    events: [
+      ...(attachments.length ? [{ at: now, kind: 'status' as const, text: `Received ${attachments.length} file(s): ${attachments.map((a) => a.name).join(', ')}`, data: { attachments: attachments.map(({ name, kind, size, path, note }) => ({ name, kind, size, path, note })) } }] : []),
+      { at: now, kind: 'status', text: 'Sending goal to WorkBuddy…' },
+    ], result: null, createdAt: now, updatedAt: now,
   };
   const { error } = await supabaseAdmin().from('agent_tasks').insert({
     id: task.id, business_id: businessId, conversation_id: task.conversationId, prompt, mode: task.mode, status: task.status, events: task.events, created_at: now, updated_at: now,
   });
   if (error) throw new Error(error.message);
-  const l: Live = { task, businessId, history, abort: new AbortController(), dirty: false };
+  const l: Live = { task, attachments, businessId, history, abort: new AbortController(), dirty: false };
   live.set(task.id, l);
   void withRuntime(() => run(l));
   return task;
@@ -172,10 +218,13 @@ async function run(l: Live) {
     }
     /** Lead's Agent tool call id -> member name, to label each member's steps. */
     const members = new Map<string, string>();
+    const text = (l.history
+      ? `This continues an earlier conversation with the owner. Earlier messages, oldest first:\n\n${l.history}\n\n---\nThe owner's new message (answer this; "this", "it" or "yes" refer to the conversation above):\n${task.prompt}`
+      : task.prompt) + filesText(l.attachments);
+    const images = l.attachments.flatMap((a) => a.images ?? []);
     const q = query({
-      prompt: l.history
-        ? `This continues an earlier conversation with the owner. Earlier messages, oldest first:\n\n${l.history}\n\n---\nThe owner's new message (answer this; "this", "it" or "yes" refer to the conversation above):\n${task.prompt}`
-        : task.prompt,
+      // With pictures, the goal goes in as one message of text plus images (WorkBuddy reads them directly).
+      prompt: images.length ? oneMessage([{ type: 'text', text }, ...images.map((data) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } }))]) : text,
       options: {
         environment,
         pathToCodebuddyCode: cliPath(),

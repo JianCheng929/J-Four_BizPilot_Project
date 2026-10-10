@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ListChecks,
-  Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Send, Sparkles, Square, Trash2, Wrench,
+  FileSpreadsheet, FileText, Film, Image as ImageIcon, Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Send, Sparkles, Square, Trash2, Wrench, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useBizPilot } from '@/lib/store';
@@ -17,6 +17,7 @@ import { fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { Markdown } from '@/components/bizpilot/Markdown';
 import { VideoMaker, type VideoPlan } from '@/components/bizpilot/VideoMaker';
+import { ACCEPT, MAX_FILES, readChatFile, type ChatFile } from '@/lib/attachments';
 
 /**
  * Command Centre: a chat with WorkBuddy. Each chat keeps its history, so the
@@ -38,6 +39,28 @@ const GOALS: { label: string; prompt: string }[] = [
 ];
 
 const ACTIVE: AgentTask['status'][] = ['starting', 'running', 'waiting_permission'];
+
+const FILE_ICON: Record<ChatFile['kind'], typeof Bot> = { image: ImageIcon, pdf: FileText, sheet: FileSpreadsheet, text: FileText, video: Film };
+
+function FileChip({ name, kind, preview, onRemove, light }: { name: string; kind: ChatFile['kind']; preview?: string; onRemove?: () => void; light?: boolean }) {
+  const Icon = FILE_ICON[kind] ?? FileText;
+  return (
+    <span className={cn('inline-flex max-w-[220px] items-center gap-1.5 rounded-lg border px-1.5 py-1 text-xs', light ? 'border-white/30 bg-white/15 text-white' : 'border-slate-200 bg-white text-slate-700')}>
+      {preview ? <img src={preview} alt="" className="h-8 w-8 shrink-0 rounded object-cover" /> : <Icon className="h-4 w-4 shrink-0" />}
+      <span className="truncate">{name}</span>
+      {onRemove && <button title="Remove" className="shrink-0 rounded p-0.5 text-slate-400 hover:text-red-600" onClick={onRemove}><X className="h-3.5 w-3.5" /></button>}
+    </span>
+  );
+}
+
+/** Files the owner sent with a message (kept on the first event of the turn). */
+function sentFiles(task: AgentTask) {
+  for (const e of task.events) {
+    const files = (e.data as { attachments?: { name: string; kind: ChatFile['kind'] }[] } | undefined)?.attachments;
+    if (files?.length) return files;
+  }
+  return [];
+}
 
 const ICON: Record<AgentEvent['kind'], typeof Bot> = {
   status: CircleDot, message: MessageSquare, thought: Sparkles, plan: ListChecks, tool_call: Wrench,
@@ -196,7 +219,12 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-sm bg-teal-700 px-4 py-2.5 text-sm text-white">{task.prompt}</div>
+        <div className="max-w-[85%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-sm bg-teal-700 px-4 py-2.5 text-sm text-white">
+          {task.prompt}
+          {sentFiles(task).length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">{sentFiles(task).map((f, i) => <FileChip key={i} name={f.name} kind={f.kind} light />)}</div>
+          )}
+        </div>
       </div>
       <div className="flex gap-3">
         <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-700"><Bot className="h-4 w-4" /></div>
@@ -248,8 +276,28 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
 }
 
 export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => void } = {}) {
-  const { db, reload } = useBizPilot();
+  const { db, reload, business } = useBizPilot();
   const [prompt, setPrompt] = useState('');
+  const [files, setFiles] = useState<ChatFile[]>([]);
+  const [reading, setReading] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const addFiles = async (list: FileList | File[]) => {
+    const picked = Array.from(list).slice(0, Math.max(0, MAX_FILES - files.length));
+    if (list.length > picked.length) toast.error(`Up to ${MAX_FILES} files per message.`);
+    setReading((n) => n + picked.length);
+    await Promise.all(picked.map(async (f) => {
+      try {
+        const read = await readChatFile(f, business.id);
+        setFiles((fs) => (fs.length >= MAX_FILES ? fs : [...fs, read]));
+      } catch (e) {
+        toast.error((e as Error).message);
+      } finally {
+        setReading((n) => n - 1);
+      }
+    }));
+  };
   const [chats, setChats] = useState<Chat[]>(() => chatsFrom(db.agentTasks));
   const [chatId, setChatId] = useState<string | null>(null);
   const [turns, setTurns] = useState<AgentTask[]>([]);
@@ -323,13 +371,15 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
 
   const send = async (text: string) => {
     const goal = text.trim();
-    if (!goal || active) return;
+    if ((!goal && !files.length) || active || reading) return;
     setSending(true);
     try {
-      const t = await post<AgentTask>('/api/agent/tasks', { prompt: goal, conversationId: chatId });
+      const attachments = files.map((f) => ({ name: f.name, kind: f.kind, size: f.size, text: f.text, images: f.images, path: f.path, note: f.note }));
+      const t = await post<AgentTask>('/api/agent/tasks', { prompt: goal, conversationId: chatId, attachments: attachments.length ? attachments : undefined });
       setTurns((ts) => [...ts, t]);
       setChatId(t.conversationId || t.id);
       setPrompt('');
+      setFiles([]);
       void loadChats();
     } catch (e) {
       toast.error((e as Error).message);
@@ -400,7 +450,17 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
           </CardContent>
         </Card>
 
-        <Card className="flex min-h-[70vh] min-w-0 flex-col">
+        <Card
+          className={cn('relative flex min-h-[70vh] min-w-0 flex-col', dragging && 'ring-2 ring-teal-400')}
+          onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setDragging(false); }}
+          onDrop={(e) => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDragging(false); if (!active) void addFiles(e.dataTransfer.files); }}
+        >
+          {dragging && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-teal-50/80 text-sm font-medium text-teal-800">
+              Drop receipts, quotations, photos, videos or spreadsheets. BizPilot reads them and records everything.
+            </div>
+          )}
           {!showChats && (
             <div className="flex items-center gap-2 border-b border-slate-100 px-4 pb-3">
               <Button variant="outline" size="sm" onClick={() => setShowChats(true)}>
@@ -440,20 +500,31 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
                 ))}
               </div>
             )}
+            {(files.length > 0 || reading > 0) && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {files.map((f, i) => <FileChip key={`${f.name}-${i}`} name={f.name} kind={f.kind} preview={f.preview} onRemove={() => setFiles((fs) => fs.filter((_, j) => j !== i))} />)}
+                {reading > 0 && <span className="inline-flex items-center gap-1 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading {reading} file{reading > 1 ? 's' : ''}…</span>}
+              </div>
+            )}
             <div className="flex items-end gap-2">
+              <input ref={fileInput} type="file" multiple accept={ACCEPT} className="hidden" onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }} />
+              <Button variant="outline" size="icon" className="h-10 w-10 shrink-0" title="Attach receipts, quotations, photos, videos, PDFs or spreadsheets" disabled={!!active || files.length >= MAX_FILES} onClick={() => fileInput.current?.click()}>
+                <Paperclip className="h-4 w-4" />
+              </Button>
               <Textarea
                 rows={2}
                 value={prompt}
                 placeholder={turns.length ? 'Reply to WorkBuddy…' : 'e.g. Restock anything that will run out within 10 days and draft the POs for my approval'}
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(prompt); } }}
+                onPaste={(e) => { const pasted = Array.from(e.clipboardData.files); if (pasted.length) { e.preventDefault(); void addFiles(pasted); } }}
                 disabled={!!active}
               />
-              <Button className="h-10 bg-teal-700 text-white hover:bg-teal-800" disabled={!prompt.trim() || !!active || sending} onClick={() => void send(prompt)}>
+              <Button className="h-10 bg-teal-700 text-white hover:bg-teal-800" disabled={(!prompt.trim() && !files.length) || !!active || sending || reading > 0} onClick={() => void send(prompt)}>
                 {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </Button>
             </div>
-            <p className="text-[11px] text-slate-400">Enter to send, Shift+Enter for a new line.</p>
+            <p className="text-[11px] text-slate-400">Enter to send, Shift+Enter for a new line. Attach or drop receipts, quotations, bills, order screenshots, product photos or videos: BizPilot works out what each one is and records it.</p>
           </div>
         </Card>
       </div>

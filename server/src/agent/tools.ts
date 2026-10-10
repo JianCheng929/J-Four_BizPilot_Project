@@ -19,7 +19,7 @@ import { finishKlingVideo, klingConfigured, startKlingVideo } from '../lib/kling
 import { injectionFlag, untrusted } from './untrusted.ts';
 import { detectSignals } from '../../../src/lib/signals.ts';
 import { verifyWork } from '../../../src/lib/verify.ts';
-import { deriveCustomers } from '../../../src/components/bizpilot/customers.ts';
+import { deriveCustomers } from '../../../src/lib/customers.ts';
 
 /**
  * BizPilot's tools, exposed to the WorkBuddy agent as an in-process MCP server.
@@ -519,6 +519,28 @@ export function buildBizPilotServer(businessId: string, emit: Emit, startedAt = 
         return { poNumber: r.poNumber, status: r.status };
       }))),
 
+    tool('record_purchase_already_made', 'Record stock the owner ALREADY bought and paid for (from a receipt, paid supplier invoice or delivery order they sent you). Creates the supplier if new, creates missing products, books it as a placed PO so cash counts it, and receives the goods into stock when they are in. No approval: the money is already spent. Not for quotations (use draft_purchase_order).',
+      { supplier: z.string().describe('Supplier name as on the document'), supplierPhone: z.string().optional(), supplierEmail: z.string().optional(),
+        reference: z.string().optional().describe('Receipt / invoice / DO number on the document (used to stop duplicates)'),
+        lines: z.array(z.object({ product: z.string().describe('Existing product id/SKU/name, or the item name from the document'), quantity: z.number().positive(), unitCost: z.number().nonnegative(), sellingPrice: z.number().nonnegative().optional().describe('For new products: a selling price if you can set one sensibly') })).min(1),
+        received: z.boolean().default(true).describe('Goods are already in the shop/warehouse'), date: z.string().optional(), deliverTo: z.string().optional() },
+      write(async ({ supplier, supplierPhone, supplierEmail, reference, lines, received, deliverTo }) => withBusiness(businessId, (db) => {
+        const s = ops.findSupplier(db, supplier) ?? ops.createSupplier(db, { name: supplier.trim(), phone: supplierPhone ?? '', email: supplierEmail ?? '', notes: 'Added from a receipt the owner sent' }, ACTOR);
+        const created: string[] = [];
+        const poLines = lines.map((l) => {
+          let p: BizPilotDB['products'][number] | undefined;
+          try { p = ops.requireProduct(db, l.product); } catch { p = undefined; }
+          if (!p) {
+            p = ops.createProduct(db, { name: l.product.trim(), price: l.sellingPrice ?? 0, unitCost: l.unitCost, supplierId: s.id }, ACTOR);
+            created.push(`${p.name} (${p.sku})`);
+          }
+          return { productId: p.id, quantity: Math.round(l.quantity), unitCost: l.unitCost };
+        });
+        const po = ops.recordCompletedPurchase(db, { supplierId: s.id, lines: poLines, reference, received, locationId: findLocation(db, deliverTo)?.id ?? null }, ACTOR);
+        emit({ kind: 'artifact', text: `Recorded purchase ${po.poNumber} from ${s.name}: RM${po.totalCost.toFixed(2)}${received ? ', stock received' : ''}` });
+        return { poNumber: po.poNumber, status: po.status, total: po.totalCost, supplier: s.name, newProducts: created, note: created.length ? 'New products have no selling price unless given: set one with update_product or request_price_change.' : undefined };
+      }))),
+
     tool('record_stock_movement', 'Record stock in/out with a reason (e.g. goods received without PO, damaged stock written off).',
       { product: z.string(), type: z.enum(['in', 'out']), quantity: z.number().int().positive(), reason: z.string() },
       write(async ({ product, type, quantity, reason }) => withBusiness(businessId, (db) => {
@@ -669,11 +691,14 @@ export function buildBizPilotServer(businessId: string, emit: Emit, startedAt = 
         return { approvalId, status: 'waiting_for_owner_approval' };
       })),
 
-    tool('add_expense', 'Record a business expense or an unpaid bill (paid=false with dueDate).',
-      { category: z.string(), description: z.string(), amount: z.number().positive(), date: z.string().optional(), paid: z.boolean().default(true), dueDate: z.string().optional(), recurring: z.boolean().default(false), branch: z.string().optional().describe('Location name the cost belongs to; empty = whole business') },
-      write(async ({ branch, ...a }) => withBusiness(businessId, (db) => {
+    tool('add_expense', 'Record a business expense or an unpaid bill (paid=false with dueDate). Pass receiptFile when the owner sent the receipt or bill, so it is kept with the expense.',
+      { category: z.string(), description: z.string(), amount: z.number().positive(), date: z.string().optional(), paid: z.boolean().default(true), dueDate: z.string().optional(), recurring: z.boolean().default(false), branch: z.string().optional().describe('Location name the cost belongs to; empty = whole business'), receiptFile: z.string().optional().describe('The "stored as" path of a file the owner attached') },
+      write(async ({ branch, receiptFile, ...a }) => withBusiness(businessId, (db) => {
+        const dup = db.expenses.find((x) => Math.abs(x.amount - a.amount) < 0.01 && (x.date ?? '').slice(0, 10) === (a.date ?? '').slice(0, 10) && x.description.toLowerCase() === a.description.toLowerCase());
+        if (dup && a.date) throw new ops.OpError(`This looks already recorded: ${dup.description} RM${dup.amount} on ${dup.date.slice(0, 10)}.`);
         const e = ops.addExpense(db, { ...a, date: a.date ?? new Date().toISOString(), dueDate: a.dueDate ?? null }, ACTOR);
         if (branch) e.locationId = findLocation(db, branch)!.id;
+        if (receiptFile && receiptFile.startsWith(`${businessId}/`)) e.receiptUrl = receiptFile;
         return { id: e.id, amount: e.amount };
       }))),
 

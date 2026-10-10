@@ -33,6 +33,8 @@ const allowedOrigin = (o: string) =>
   origins.includes(o) || /^http:\/\/localhost:\d+$/.test(o) || /^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(o);
 
 app.use(cors({ origin: (origin, cb) => cb(null, !origin || allowedOrigin(origin)) }));
+// Goals can carry the owner's photos and documents (already shrunk in the browser).
+app.use('/api/agent/tasks', express.json({ limit: '16mb' }));
 app.use(express.json({ limit: '1mb' }));
 // Render sits behind one proxy; trust it so req.ip is the caller's address.
 app.set('trust proxy', 1);

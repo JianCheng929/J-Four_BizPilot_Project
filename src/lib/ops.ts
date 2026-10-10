@@ -1360,6 +1360,29 @@ export function receivePurchaseOrder(
   return po;
 }
 
+/**
+ * A purchase the owner already made and paid (from a receipt or supplier invoice they sent):
+ * recorded as a placed PO so the cash ledger counts it, and received when the goods are in.
+ * No approval and no cash check: the money is already spent.
+ */
+export function recordCompletedPurchase(db: BizPilotDB, input: POInput & { received: boolean; reference?: string }, actor: string): PurchaseOrder {
+  const ref = input.reference?.trim();
+  if (ref) {
+    const dup = db.purchaseOrders.find((p) => p.supplierId === input.supplierId && p.status !== 'cancelled' && (p.note ?? '').includes(`Ref ${ref}`));
+    if (dup) throw new OpError(`Supplier document ${ref} is already recorded as ${dup.poNumber}.`);
+  }
+  const po = createPurchaseOrder(db, { ...input, note: [ref ? `Ref ${ref}` : '', 'Recorded from the owner\'s receipt', input.note ?? ''].filter(Boolean).join(' · ') }, actor, 'approved');
+  po.status = 'ordered';
+  po.sentAt = now();
+  for (const l of po.lines) {
+    const p = db.products.find((x) => x.id === l.productId);
+    if (p) p.incoming += l.quantity;
+  }
+  audit(db, actor, 'execute', 'purchase_order', po.poNumber, `${po.poNumber} recorded as already bought (RM${po.totalCost.toFixed(2)})`);
+  if (input.received) receivePurchaseOrder(db, po.id, 'all', actor);
+  return po;
+}
+
 export function cancelPurchaseOrder(db: BizPilotDB, poId: string, actor: string) {
   const po = db.purchaseOrders.find((p) => p.id === poId);
   if (!po) throw new OpError('Purchase order not found.');

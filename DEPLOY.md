@@ -59,7 +59,7 @@ In Supabase → SQL Editor, run these two files (both are safe to re-run):
 - `supabase/team-features.sql`: held stock, expiry date, safety/max stock, pack size, and returns.
 
 ## 8. AI images and videos
-- Images work with no setup (free generator). Optional: `POLLINATIONS_TOKEN` on Render for higher limits.
+- Images: add `GEMINI_API_KEY` on Render (free key from aistudio.google.com/apikey; image generation is billed per image), or `OPENAI_API_KEY`, or the Kling keys below. Without a key a free, low-quality service is used and it often refuses with error 402.
 - Real motion video uses Kling AI: in Render → Environment add `KLING_ACCESS_KEY` and
   `KLING_SECRET_KEY` from the Kling developer console (paid API credits). Without them,
   videos are made as animated slideshows from AI images in the browser.

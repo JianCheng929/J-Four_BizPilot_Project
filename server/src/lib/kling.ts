@@ -103,3 +103,31 @@ export async function finishKlingVideo(businessId: string, taskId: string, conte
     ops.audit(db, 'Kling AI', 'create', 'content', contentId, `Video generated for ${title}`);
   });
 }
+
+/** Kling (Kolors) text-to-image. Returns a temporary Kling image link. */
+export async function klingImage(prompt: string, aspect: '1:1' | '4:5' | '9:16' | '16:9'): Promise<string> {
+  const data = await call('/v1/images/generations', {
+    method: 'POST',
+    body: JSON.stringify({
+      model_name: process.env.KLING_IMAGE_MODEL || 'kling-v1',
+      prompt: prompt.slice(0, 2400),
+      negative_prompt: 'text, watermark, logo, blurry, deformed hands, extra fingers, distorted face, low quality',
+      aspect_ratio: aspect === '4:5' ? '3:4' : aspect,
+      n: 1,
+    }),
+  });
+  const id = data.task_id as string | undefined;
+  if (!id) throw new Error('Kling did not return a task id.');
+  const deadline = Date.now() + 3 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((ok) => setTimeout(ok, 4000));
+    const d = await call(`/v1/images/generations/${id}`);
+    if (d.task_status === 'succeed') {
+      const url = d.task_result?.images?.[0]?.url;
+      if (url) return url;
+      throw new Error('Kling finished without an image.');
+    }
+    if (d.task_status === 'failed') throw new Error(d.task_status_msg || 'Kling could not make this image.');
+  }
+  throw new Error('Kling took too long to make the image.');
+}

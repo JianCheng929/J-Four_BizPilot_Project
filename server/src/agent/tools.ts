@@ -542,7 +542,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         return issues.length ? { passed: !issues.some((i) => i.level === 'block'), issues } : { passed: true, issues: [] };
       })),
 
-    tool('generate_image', 'Generate a real AI image (product shot, poster, social post visual, thumbnail) from a detailed English prompt. Returns a public image URL. Optionally attach it to a content draft. Put the image in your reply as ![short title](url) so the owner sees it.',
+    tool('generate_image', 'Generate a real AI image (product shot, poster, social post visual, thumbnail) from a detailed English prompt. Make the PRODUCT the hero (close-up product shots, flat lays, food styling, hands holding the product); avoid close-up faces of people. Returns a public image URL. Optionally attach it to a content draft. Put the image in your reply as ![short title](url) so the owner sees it.',
       {
         prompt: z.string().describe('Detailed visual description: subject, setting, style, lighting, colours, camera angle. Describe the product exactly; never add text, logos or prices to the image.'),
         aspect: z.enum(['1:1', '4:5', '9:16', '16:9']).default('1:1').describe('1:1 or 4:5 for feed posts, 9:16 for TikTok/Reels/Stories, 16:9 for YouTube'),
@@ -571,6 +571,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         scenes: z.array(z.object({
           caption: z.string().max(90).describe('Short on-screen text for this scene (what viewers read)'),
           imagePrompt: z.string().describe('Detailed visual description for this scene, no text in the image'),
+          imageUrl: z.string().url().optional().describe('Reuse an image you already generated or the owner gave; skips generating this scene'),
           seconds: z.number().min(1.5).max(6).default(3),
         })).min(2).max(6),
         contentId: z.string().optional().describe('Existing video draft to attach the video to'),
@@ -602,11 +603,21 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
           }
         }
         const rendered: { caption: string; imageUrl: string; seconds: number }[] = [];
+        const failures: string[] = [];
         for (const [i, sc] of scenes.entries()) {
+          if (sc.imageUrl) {
+            rendered.push({ caption: sc.caption, imageUrl: sc.imageUrl, seconds: sc.seconds ?? 3 });
+            continue;
+          }
           emit({ kind: 'status', text: `Generating scene ${i + 1} of ${scenes.length}…` });
-          const img = await generateImage(businessId, sc.imagePrompt, aspect === '16:9' ? '16:9' : aspect === '1:1' ? '1:1' : '9:16');
-          rendered.push({ caption: sc.caption, imageUrl: img.url, seconds: sc.seconds ?? 3 });
+          try {
+            const img = await generateImage(businessId, sc.imagePrompt, aspect === '16:9' ? '16:9' : aspect === '1:1' ? '1:1' : '9:16');
+            rendered.push({ caption: sc.caption, imageUrl: img.url, seconds: sc.seconds ?? 3 });
+          } catch (e) {
+            failures.push(`scene ${i + 1}: ${(e as Error).message}`);
+          }
         }
+        if (rendered.length < 2) throw new Error(`Not enough scene images (${failures.join('; ')}). Retry make_video passing imageUrl for scenes you already have.`);
         const id = await ensureDraft(rendered[0].imageUrl);
         emit({ kind: 'artifact', text: `Video ready to render: ${title}`, data: { media: 'video', contentId: id, title, aspect, scenes: rendered } });
         return { contentId: id, scenes: rendered.length, status: 'The video is rendering in the owner\'s Command Centre and will be saved on the draft automatically. Tell the owner it appears below this message with a download button.' };

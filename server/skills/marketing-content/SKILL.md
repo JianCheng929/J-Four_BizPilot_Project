@@ -77,8 +77,10 @@ film the script.
 ## Images
 
 For every post, carousel or ad, call `generate_image` with the draft's `contentId` and a
-detailed prompt (subject, setting, style, lighting, colours). No text, logos or prices
-in the image. Show it in your reply as `![title](url)`.
+detailed prompt (subject, setting, style, lighting, colours). Make the product the hero:
+close-up product shots, flat lays, food styling, hands holding the product. Avoid
+close-up faces. No text, logos or prices in the image. If make_video fails on some
+scenes, call it again passing `imageUrl` for the images you already have. Show it in your reply as `![title](url)`.
 
 ## 6. Campaigns and ads (C4)
 

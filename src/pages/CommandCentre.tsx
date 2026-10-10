@@ -15,6 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { Markdown } from '@/components/bizpilot/Markdown';
 
 /**
  * Command Centre: the owner gives one goal, WorkBuddy plans it, calls BizPilot's
@@ -59,10 +60,10 @@ function EventRow({ e }: { e: AgentEvent }) {
         {e.kind === 'plan' ? (
           <div className="rounded-md border border-indigo-100 bg-indigo-50/60 p-2">
             <div className="mb-1 text-xs font-semibold text-indigo-700">Plan</div>
-            <div className="whitespace-pre-wrap text-slate-700">{e.text}</div>
+            <Markdown text={e.text} className="text-slate-700" />
           </div>
         ) : e.kind === 'message' ? (
-          <div className="whitespace-pre-wrap text-slate-800">{e.text}</div>
+          <Markdown text={e.text} className="text-slate-800" />
         ) : expandable ? (
           <button className="flex w-full items-start gap-1 text-left" onClick={() => setOpen((o) => !o)}>
             {open ? <ChevronDown className="mt-0.5 h-3.5 w-3.5 text-slate-400" /> : <ChevronRight className="mt-0.5 h-3.5 w-3.5 text-slate-400" />}
@@ -235,7 +236,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
                 {task.result && !running && (
                   <div className={cn('mt-2 rounded-lg border p-3 text-sm', task.status === 'completed' ? 'border-teal-200 bg-teal-50/60' : 'border-red-200 bg-red-50')}>
                     <div className="mb-1 text-xs font-semibold text-slate-600">{task.status === 'completed' ? 'Result' : 'Stopped'}</div>
-                    <div className="whitespace-pre-wrap text-slate-800">{task.result}</div>
+                    <Markdown text={task.result} className="text-slate-800" />
                   </div>
                 )}
                 {created.length > 0 && !running && (

@@ -123,7 +123,7 @@ export function Inventory() {
   // group reorder suggestions by supplier
   const groups = new Map<string, typeof suggestions>();
   for (const s of suggestions) {
-    const key = s.supplier?.id ?? '__none';
+    const key = s.make ? '__make' : s.supplier?.id ?? '__none';
     groups.set(key, [...(groups.get(key) ?? []), s]);
   }
 
@@ -137,6 +137,11 @@ export function Inventory() {
       .filter((l) => l.quantity > 0);
     if (!lines.length) return;
     run((d, a) => draftPOForApproval(d, { supplierId, lines, note: 'Drafted from reorder suggestions' }, a), 'Draft PO sent to Approvals');
+  };
+  const planProduction = (items: typeof suggestions) => {
+    const lines = items.map((s) => ({ productId: s.product.id, quantity: Math.round(Number(qtyOverride[s.product.id] ?? s.suggestedQty)) })).filter((l) => l.quantity > 0);
+    if (!lines.length) return;
+    run((d, a) => lines.map((l) => ops.createProductionOrder(d, l, a)), 'Production orders sent to Approvals (see Supply Chain → Production)');
   };
 
   return (
@@ -523,6 +528,7 @@ export function Inventory() {
           ) : (
             [...groups.entries()].map(([key, items]) => {
               const supplier = items[0].supplier;
+              const make = key === '__make';
               const total = items.reduce(
                 (s, it) => s + Number(qtyOverride[it.product.id] ?? it.suggestedQty) * (it.product.unitCost || supplier?.unitCost || 0),
                 0,
@@ -530,14 +536,20 @@ export function Inventory() {
               return (
                 <SectionCard
                   key={key}
-                  title={supplier ? supplier.name : 'No supplier assigned'}
+                  title={make ? 'Made in-house' : supplier ? supplier.name : 'No supplier assigned'}
                   description={
-                    supplier
+                    make
+                      ? 'These have a recipe, so they are replenished by production. Materials are checked before production starts.'
+                      : supplier
                       ? `Lead time ${supplier.leadTimeDays} days · MOQ ${supplier.minOrderQty} · estimated ${money(total)}`
                       : 'Assign a supplier to these products (Edit product) to draft a PO.'
                   }
                   actions={
-                    supplier ? (
+                    make ? (
+                      <Button size="sm" className={primaryBtn} onClick={() => planProduction(items)}>
+                        <PackagePlus className="mr-1 h-4 w-4" /> Plan production for approval
+                      </Button>
+                    ) : supplier ? (
                       <Button size="sm" className={primaryBtn} onClick={() => draftPO(supplier.id, items)}>
                         <PackagePlus className="mr-1 h-4 w-4" /> Draft PO for approval
                       </Button>
@@ -555,7 +567,7 @@ export function Inventory() {
                         <TableHead>Why</TableHead>
                         <TableHead className="w-28 text-right">Order qty</TableHead>
                         <TableHead className="text-right">Unit cost</TableHead>
-                        {!supplier && <TableHead />}
+                        {!supplier && !make && <TableHead />}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -584,7 +596,7 @@ export function Inventory() {
                             />
                           </TableCell>
                           <TableCell className="text-right">{money(s.product.unitCost || supplier?.unitCost || 0)}</TableCell>
-                          {!supplier && (
+                          {!supplier && !make && (
                             <TableCell className="text-right">
                               <Button size="sm" variant="outline" onClick={() => setProductDialog({ open: true, product: s.product })}>
                                 Set supplier

@@ -59,6 +59,7 @@ export function emptyDB(): BizPilotDB {
     locations: [],
     transfers: [],
     stockCounts: [],
+    productionOrders: [],
     approvals: [],
     auditLog: [],
     notifications: [],
@@ -101,6 +102,10 @@ const RECORD_DEFAULTS: Partial<Record<CollectionKey, Record<string, unknown>>> =
   locations: { type: 'store', address: '', isDefault: false, active: true },
   transfers: { lines: [], note: '', shippedAt: null, receivedAt: null, createdBy: '' },
   stockCounts: { lines: [], blind: false, note: '', submittedAt: null, decidedAt: null, createdBy: '' },
+  productionOrders: {
+    locationId: '', materials: [], plannedUnitCost: 0, actualUnitCost: 0, labourCost: 0, overheadCost: 0, goodQty: 0,
+    rejectedQty: 0, batchNumber: '', qcNotes: '', dueDate: '', note: '', startedAt: null, completedAt: null, createdBy: '',
+  },
   campaigns: { dailyCap: 0, spend: 0, clicks: 0, impressions: 0, conversions: 0, revenue: 0 },
   agentTasks: { events: [], result: null, workbuddyTaskId: null, workbuddyLink: null },
 };
@@ -111,6 +116,7 @@ const NUMERIC_KEYS = new Set([
   'quantity', 'minOrderQty', 'leadTimeDays', 'reliabilityScore', 'onTimeRate', 'defectRate', 'totalCost',
   'total', 'amount', 'subtotal', 'taxTotal', 'rating', 'budget', 'dailyCap', 'spend', 'clicks',
   'impressions', 'conversions', 'revenue', 'unavailable', 'safetyStock', 'maxStock', 'orderMultiple', 'refundAmount',
+  'overheadCost', 'labourCost', 'plannedUnitCost', 'actualUnitCost', 'goodQty', 'rejectedQty',
 ]);
 
 export function normalizeRecord(collection: CollectionKey, obj: Record<string, unknown>): Record<string, unknown> {

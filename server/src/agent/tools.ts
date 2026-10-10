@@ -133,6 +133,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
           product: { id: s.product.id, sku: s.product.sku, name: s.product.name, unitCost: s.product.unitCost },
           supplier: s.supplier ? { id: s.supplier.id, name: s.supplier.name, leadTimeDays: s.supplier.leadTimeDays, minOrderQty: s.supplier.minOrderQty } : null,
           available: s.available, daysLeft: s.daysLeft, stockoutDate: s.stockoutDate, urgency: s.urgency, suggestedQty: s.suggestedQty, reason: s.reason,
+          replenishBy: s.make ? 'production (plan_production)' : 'purchase order',
         }));
       })),
 
@@ -201,6 +202,79 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         const r = periodReport(db, { from, to, channel, source, productId });
         return { ...r, products: r.products.slice(0, 20), daily: r.days > 62 ? undefined : r.daily };
       })),
+
+    tool('get_production_overview', 'Manufacturing: recipes (materials per unit, cost per unit, margin, units that can be made now), open production orders with material shortages, and made products that need producing.', {},
+      safe(async () => {
+        const db = await readSnapshot(businessId);
+        const name = (id: string) => db.products.find((p) => p.id === id)?.name ?? id;
+        return {
+          recipes: db.products.filter((p) => p.bom?.length).map((p) => ({
+            sku: p.sku, name: p.name, inStock: p.stock, price: p.price, costPerUnit: ops.plannedUnitCost(db, p), materialCostPerUnit: ops.materialCostPerUnit(db, p),
+            labourCost: p.labourCost ?? 0, overheadCost: p.overheadCost ?? 0, canMakeNow: ops.maxProducible(db, p),
+            materials: p.bom!.map((l) => ({ material: name(l.productId), perUnit: l.quantity })),
+          })),
+          openOrders: (db.productionOrders ?? []).filter((o) => ['pending_approval', 'approved', 'in_progress'].includes(o.status)).map((o) => ({
+            orderNumber: o.orderNumber, product: name(o.productId), quantity: o.quantity, status: o.status, dueDate: o.dueDate || null,
+            shortages: o.status === 'in_progress' ? [] : ops.materialRequirements(db, o.productId, o.quantity, o.locationId, o.id).filter((m) => m.shortage > 0).map((m) => ({ material: m.product.name, short: m.shortage, incoming: m.product.incoming, supplier: m.supplier?.name ?? null })),
+          })),
+          recentlyCompleted: (db.productionOrders ?? []).filter((o) => o.status === 'completed').slice(0, 5).map((o) => ({ orderNumber: o.orderNumber, product: name(o.productId), good: o.goodQty, rejected: o.rejectedQty, actualUnitCost: o.actualUnitCost, plannedUnitCost: o.plannedUnitCost })),
+          needsProducing: ops.reorderSuggestions(db).filter((x) => x.make).map((x) => ({ product: x.product.name, suggestedQty: x.suggestedQty, urgency: x.urgency, reason: x.reason })),
+        };
+      })),
+
+    tool('set_recipe', 'Set the bill of materials for a product the business makes: materials (existing products) and quantity per finished unit, plus labour and overhead per unit. Empty materials removes the recipe.',
+      { product: z.string(), materials: z.array(z.object({ product: z.string(), quantity: z.number().positive() })), labourCost: z.number().nonnegative().optional(), overheadCost: z.number().nonnegative().optional() },
+      write(async ({ product, materials, labourCost, overheadCost }) => withBusiness(businessId, (db) => {
+        const p = ops.requireProduct(db, product);
+        ops.setBom(db, p.id, { lines: materials.map((m) => ({ productId: ops.requireProduct(db, m.product).id, quantity: m.quantity })), labourCost, overheadCost }, ACTOR);
+        return { product: p.name, costPerUnit: ops.plannedUnitCost(db, p), canMakeNow: ops.maxProducible(db, p) };
+      }))),
+
+    tool('plan_production', 'Create a production order for a product with a recipe and send it for approval. Reports material shortages; follow with buy_production_materials if anything is short.',
+      { product: z.string(), quantity: z.number().int().positive(), dueDate: z.string().optional().describe('YYYY-MM-DD'), location: z.string().optional(), note: z.string().optional() },
+      write(async ({ product, quantity, dueDate, location, note }) => {
+        const { order, approval, short } = await withBusiness(businessId, (db) => {
+          const p = ops.requireProduct(db, product);
+          const r = ops.createProductionOrder(db, { productId: p.id, quantity, dueDate, locationId: findLocation(db, location)?.id ?? null, note }, ACTOR);
+          const short = ops.materialRequirements(db, p.id, quantity, r.order.locationId, r.order.id).filter((m) => m.shortage > 0).map((m) => `${m.shortage} ${m.product.name}`);
+          return { ...r, short };
+        });
+        emit({ kind: 'artifact', text: `Production order ${order.orderNumber}: ${quantity} units${short.length ? ` (short: ${short.join(', ')})` : ''}` });
+        return { orderNumber: order.orderNumber, plannedUnitCost: order.plannedUnitCost, shortages: short, approval: await afterApproval(approval) };
+      })),
+
+    tool('buy_production_materials', 'Draft purchase orders (one per supplier, each sent for approval) for materials a production order is short of, after stock already on order.',
+      { order: z.string().describe('Production order number, e.g. MO-00001') },
+      write(async ({ order }) => {
+        const r = await withBusiness(businessId, (db) => {
+          const o = ops.draftMaterialPurchases(db, order, ACTOR);
+          return { pos: o.purchaseOrders.map((po) => ({ poNumber: po.poNumber, total: po.totalCost })), noSupplier: o.noSupplier, approvals: db.approvals.filter((a) => o.purchaseOrders.some((po) => a.payload.purchaseOrderId === po.id)) };
+        });
+        const results = [];
+        for (const a of r.approvals) results.push(await afterApproval(a));
+        return { purchaseOrders: r.pos, approvals: results, noSupplierFor: r.noSupplier };
+      })),
+
+    tool('start_production', 'Mark an approved production order as started: its materials leave stock now. Only when the owner or staff say production has begun.',
+      { order: z.string() },
+      write(async ({ order }) => withBusiness(businessId, (db) => {
+        const o = ops.startProduction(db, order, ACTOR);
+        return { orderNumber: o.orderNumber, status: o.status };
+      }))),
+
+    tool('complete_production', 'Record a finished production run: good units go into stock at actual cost, QC rejects are recorded. Only with numbers the owner or staff give you.',
+      { order: z.string(), goodQty: z.number().int().nonnegative(), rejectedQty: z.number().int().nonnegative().optional(), qcNotes: z.string().optional(), batchNumber: z.string().optional(), expiryDate: z.string().optional().describe('YYYY-MM-DD') },
+      write(async ({ order, ...input }) => withBusiness(businessId, (db) => {
+        const o = ops.completeProduction(db, order, input, ACTOR);
+        return { orderNumber: o.orderNumber, good: o.goodQty, rejected: o.rejectedQty, actualUnitCost: o.actualUnitCost, plannedUnitCost: o.plannedUnitCost };
+      }))),
+
+    tool('cancel_production', 'Cancel a production order. If it had started, its materials go back to stock.',
+      { order: z.string() },
+      write(async ({ order }) => withBusiness(businessId, (db) => {
+        const o = ops.cancelProduction(db, order, ACTOR);
+        return { orderNumber: o.orderNumber, status: o.status };
+      }))),
 
     tool('list_locations', 'Shops, branches and warehouses with units and stock value at each, stock per product per location (including in transit), open transfers, open stock counts, and suggested transfers (move stock from a location with spare to one below its reorder level BEFORE buying more).', {},
       safe(async () => {

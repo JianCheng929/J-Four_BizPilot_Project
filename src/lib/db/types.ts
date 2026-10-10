@@ -89,6 +89,47 @@ export interface Product {
    * on a transfer between locations. The values always add up to `stock`.
    */
   locationStock?: Record<string, number>;
+  /** Bill of materials (blueprint A2): components used to make one unit. Empty or missing = bought in, not made. */
+  bom?: BomLine[];
+  /** Labour and overhead per unit made, added to material cost for the production cost. */
+  labourCost?: number;
+  overheadCost?: number;
+}
+
+export interface BomLine {
+  productId: string; // component / raw material (itself a product, so it has stock, cost and a supplier)
+  quantity: number; // per finished unit, may be fractional (e.g. 0.25 kg)
+}
+
+export interface ProductionMaterial {
+  productId: string;
+  required: number; // for the whole order
+  consumed: number; // taken from stock when production started
+  unitCost: number; // cost when consumed
+}
+
+export interface ProductionOrder {
+  id: string;
+  orderNumber: string;
+  productId: string;
+  quantity: number;
+  locationId: string; // where materials are taken from and finished goods go ('' = default)
+  status: 'pending_approval' | 'approved' | 'in_progress' | 'completed' | 'cancelled';
+  materials: ProductionMaterial[];
+  plannedUnitCost: number; // materials + labour + overhead per unit when planned
+  actualUnitCost: number; // per good unit, set on completion
+  labourCost: number; // total for the order
+  overheadCost: number; // total for the order
+  goodQty: number;
+  rejectedQty: number;
+  batchNumber: string;
+  qcNotes: string;
+  dueDate: string; // YYYY-MM-DD, '' = none
+  note: string;
+  createdAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  createdBy: string;
 }
 
 /** A shop, branch, warehouse or online fulfilment point (blueprint §3, A5, B5). */
@@ -389,7 +430,8 @@ export type ApprovalType =
   | 'stock_adjustment'
   | 'customer_message'
   | 'refund'
-  | 'stock_count';
+  | 'stock_count'
+  | 'production_order';
 
 export interface ApprovalRequest {
   id: string;
@@ -491,6 +533,7 @@ export interface BizPilotDB {
   locations: Location[];
   transfers: StockTransfer[];
   stockCounts: StockCount[];
+  productionOrders: ProductionOrder[];
   approvals: ApprovalRequest[];
   auditLog: AuditLogEntry[];
   notifications: AppNotification[];

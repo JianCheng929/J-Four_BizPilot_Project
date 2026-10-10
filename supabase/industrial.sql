@@ -12,6 +12,7 @@
 --   3. The audit log can only be added to, never edited or deleted.
 --   4. Only owners and managers can decide approvals; stock can't go negative.
 --   5. Multi-location stock: shops, warehouses, transfers and stock counts.
+--   6. Manufacturing: recipes (bill of materials) and production orders.
 -- ============================================================
 
 -- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
@@ -65,6 +66,37 @@ alter table stock_movements drop constraint if exists stock_movements_type_check
 alter table stock_movements add constraint stock_movements_type_check check (type in ('in','out','adjustment','transfer'));
 create index if not exists idx_transfers_biz on stock_transfers (business_id, created_at desc);
 create index if not exists idx_counts_biz on stock_counts (business_id, created_at desc);
+
+-- Manufacturing (blueprint §5 A2) ---------------------------------------------------
+alter table products add column if not exists bom jsonb default '[]'::jsonb;
+alter table products add column if not exists labour_cost numeric(12,2) default 0;
+alter table products add column if not exists overhead_cost numeric(12,2) default 0;
+create table if not exists production_orders (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  order_number text not null,
+  product_id text not null,
+  quantity int not null check (quantity > 0),
+  location_id text default '',
+  status text default 'pending_approval' check (status in ('pending_approval','approved','in_progress','completed','cancelled')),
+  materials jsonb not null default '[]'::jsonb,
+  planned_unit_cost numeric(12,2) default 0,
+  actual_unit_cost numeric(12,2) default 0,
+  labour_cost numeric(12,2) default 0,
+  overhead_cost numeric(12,2) default 0,
+  good_qty int default 0,
+  rejected_qty int default 0,
+  batch_number text default '',
+  qc_notes text default '',
+  due_date text default '',
+  note text default '',
+  created_at timestamptz default now(),
+  started_at timestamptz,
+  completed_at timestamptz,
+  created_by text default '',
+  unique (business_id, order_number)
+);
+create index if not exists idx_production_biz on production_orders (business_id, created_at desc);
 
 -- 1. Team members ------------------------------------------------------------------
 create table if not exists business_members (
@@ -161,7 +193,7 @@ begin
   foreach t in array array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -192,7 +224,7 @@ begin
   foreach t in array array[
     'businesses','products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders'
   ]
   loop
     execute format('alter table %I add column if not exists row_version int not null default 0', t);
@@ -254,7 +286,7 @@ declare
   allowed constant text[] := array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts'];
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders'];
   c jsonb;
   tbl text;
   op text;

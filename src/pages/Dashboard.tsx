@@ -133,6 +133,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
   }
   if (awaiting.length) briefing.push(`${awaiting.length} order(s) are waiting to be packed.`);
   if (reorder.length) briefing.push(`${reorder.length} product(s) need restocking — ${reorder[0].product.name} is most urgent (${reorder[0].available} available).`);
+  const running = (db.productionOrders ?? []).filter((o) => o.status === 'in_progress');
+  const overdueProduction = (db.productionOrders ?? []).filter((o) => ['approved', 'in_progress'].includes(o.status) && o.dueDate && o.dueDate < new Date().toISOString().slice(0, 10));
+  if (running.length) briefing.push(`${running.length} production order(s) in progress${overdueProduction.length ? `, ${overdueProduction.length} past the due date` : ''}.`);
   if (latePOs.length) briefing.push(`${latePOs.length} supplier deliver${latePOs.length > 1 ? 'ies are' : 'y is'} past the expected date.`);
   if (overdue.length) briefing.push(`${overdue.length} invoice(s) overdue, ${money(overdueTotal)} in total.`);
   if (bills.length) briefing.push(`${bills.length} bill(s) worth ${money(billsTotal)} due within 7 days.`);
@@ -148,6 +151,13 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
       title: `${s.product.name}: ${s.available <= 0 ? 'out of stock' : 'low stock'}`,
       detail: s.reason,
       page: 'inventory' as PageKey,
+    })),
+    ...overdueProduction.map((o) => ({
+      key: `mo-${o.id}`,
+      tone: 'amber' as const,
+      title: `${o.orderNumber} is past its due date`,
+      detail: `${o.quantity}× ${db.products.find((p) => p.id === o.productId)?.name ?? 'item'} · due ${o.dueDate}`,
+      page: 'supplychain' as PageKey,
     })),
     ...latePOs.map((po) => ({
       key: `po-${po.id}`,

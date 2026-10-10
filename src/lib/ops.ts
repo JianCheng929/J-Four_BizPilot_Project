@@ -11,6 +11,7 @@ import type {
   StockCount,
   StockTransfer,
   Product,
+  ProductionOrder,
   PurchaseOrder,
   ReturnCase,
   PurchaseOrderLine,
@@ -623,6 +624,8 @@ export interface ReorderSuggestion {
   urgency: ReorderUrgency;
   stockoutDate: string | null; // projected date available stock runs out
   reason: string;
+  /** Made in-house from a recipe: replenish with a production order, not a PO. */
+  make: boolean;
 }
 
 const REVIEW_DAYS = 30; // order enough to last the lead time plus a month
@@ -636,18 +639,21 @@ export function reorderSuggestions(db: BizPilotDB): ReorderSuggestion[] {
   const out: ReorderSuggestion[] = [];
   for (const p of db.products) {
     if (p.status === 'discontinued' || p.status === 'draft') continue;
-    const supplier = p.supplierId ? db.suppliers.find((s) => s.id === p.supplierId) : undefined;
+    const make = Boolean(p.bom?.length);
+    const supplier = !make && p.supplierId ? db.suppliers.find((s) => s.id === p.supplierId) : undefined;
     const lead = supplier?.leadTimeDays ?? 7;
     const demand = p.avgDailySales;
     const avail = availableToSell(p);
     const daysLeft = demand > 0 ? Math.floor(avail / demand) : null;
-    const projected = avail + p.incoming;
+    const planned = plannedOutput(db, p.id);
+    const incoming = p.incoming + planned;
+    const projected = avail + incoming;
     const safety = p.safetyStock || p.reorderLevel;
     const atArrival = projected - demand * lead;
     const reasons: string[] = [];
 
     let urgency: ReorderUrgency | null = null;
-    if (avail <= 0 && p.incoming <= 0) {
+    if (avail <= 0 && incoming <= 0) {
       urgency = 'stockout_risk';
       reasons.push('No sellable stock and nothing incoming.');
     } else if (demand > 0 && atArrival <= 0) {
@@ -684,6 +690,7 @@ export function reorderSuggestions(db: BizPilotDB): ReorderSuggestion[] {
     }
     if (qty <= 0) continue;
     if (p.incoming > 0) reasons.push(`${p.incoming} already incoming.`);
+    if (planned > 0) reasons.push(`${planned} already planned in production.`);
     out.push({
       product: p,
       supplier,
@@ -693,10 +700,312 @@ export function reorderSuggestions(db: BizPilotDB): ReorderSuggestion[] {
       urgency,
       stockoutDate: demand > 0 ? new Date(Date.now() + (avail / demand) * DAY).toISOString().slice(0, 10) : null,
       reason: reasons.join(' '),
+      make,
     });
   }
   const rank = { stockout_risk: 0, reorder_now: 1, watch: 2 };
   return out.sort((a, b) => rank[a.urgency] - rank[b.urgency] || (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+}
+
+// ---------------------------------------------------------------- manufacturing (blueprint A2)
+
+/** Production orders that will still add finished goods (approved or running). */
+const OPEN_PRODUCTION: ProductionOrder['status'][] = ['pending_approval', 'approved', 'in_progress'];
+
+/** Finished units still to come from open production orders. */
+export function plannedOutput(db: BizPilotDB, productId: string): number {
+  return (db.productionOrders ?? []).filter((o) => o.productId === productId && OPEN_PRODUCTION.includes(o.status)).reduce((s, o) => s + o.quantity, 0);
+}
+
+/** True when `componentId` is `productId`, or is itself made (through its BOM) from `productId`. */
+function madeFrom(db: BizPilotDB, componentId: string, productId: string, seen = new Set<string>()): boolean {
+  if (componentId === productId) return true;
+  if (seen.has(componentId)) return false;
+  seen.add(componentId);
+  const c = db.products.find((x) => x.id === componentId);
+  return (c?.bom ?? []).some((l) => madeFrom(db, l.productId, productId, seen));
+}
+
+export interface BomInput {
+  lines: { productId: string; quantity: number }[];
+  labourCost?: number;
+  overheadCost?: number;
+}
+
+/** Set what one unit of a product is made from. An empty list means the product is bought in, not made. */
+export function setBom(db: BizPilotDB, productId: string, input: BomInput, actor: string): Product {
+  const p = db.products.find((x) => x.id === productId);
+  if (!p) throw new OpError('Product not found.');
+  const merged = new Map<string, number>();
+  for (const l of input.lines) {
+    const c = db.products.find((x) => x.id === l.productId);
+    if (!c) throw new OpError('A material in the recipe no longer exists.');
+    if (!Number.isFinite(l.quantity) || l.quantity <= 0) throw new OpError(`Enter a quantity above 0 for ${c.name}.`);
+    if (madeFrom(db, c.id, p.id)) throw new OpError(`${c.name} can't be a material of ${p.name}: it is ${c.id === p.id ? 'the same product' : `made from ${p.name}`}.`);
+    merged.set(c.id, Math.round(((merged.get(c.id) ?? 0) + l.quantity) * 10000) / 10000);
+  }
+  const labour = input.labourCost ?? p.labourCost ?? 0;
+  const overhead = input.overheadCost ?? p.overheadCost ?? 0;
+  if (labour < 0 || overhead < 0) throw new OpError('Labour and overhead cost cannot be negative.');
+  p.bom = [...merged].map(([id, quantity]) => ({ productId: id, quantity }));
+  p.labourCost = round2(labour);
+  p.overheadCost = round2(overhead);
+  if (p.bom.length) p.unitCost = p.unitCost || plannedUnitCost(db, p);
+  audit(db, actor, 'update', 'product', p.sku, p.bom.length
+    ? `Recipe for ${p.name}: ${p.bom.map((l) => `${l.quantity}× ${db.products.find((x) => x.id === l.productId)?.name}`).join(', ')}; labour RM${p.labourCost}, overhead RM${p.overheadCost} per unit`
+    : `Recipe removed from ${p.name}`);
+  return p;
+}
+
+/** Material cost of one unit at today's material costs. */
+export function materialCostPerUnit(db: BizPilotDB, p: Product): number {
+  return round2((p.bom ?? []).reduce((s, l) => s + l.quantity * (db.products.find((x) => x.id === l.productId)?.unitCost ?? 0), 0));
+}
+
+/** Materials + labour + overhead for one unit (blueprint A2 "estimate production cost per unit"). */
+export function plannedUnitCost(db: BizPilotDB, p: Product): number {
+  return round2(materialCostPerUnit(db, p) + (p.labourCost ?? 0) + (p.overheadCost ?? 0));
+}
+
+export interface MaterialNeed {
+  product: Product;
+  perUnit: number;
+  required: number;
+  /** Sellable units at the location, less what approved production orders have not yet taken. */
+  available: number;
+  shortage: number;
+  supplier?: Supplier;
+}
+
+/**
+ * Materials needed to make `quantity` units and whether there are enough
+ * (blueprint A2: "check material availability before production begins").
+ */
+export function materialRequirements(db: BizPilotDB, productId: string, quantity: number, locationId = '', excludeOrderId = ''): MaterialNeed[] {
+  const p = db.products.find((x) => x.id === productId);
+  if (!p) throw new OpError('Product not found.');
+  const committed = new Map<string, number>();
+  for (const o of db.productionOrders ?? []) {
+    if (o.id === excludeOrderId || (o.status !== 'approved' && o.status !== 'pending_approval')) continue;
+    for (const m of o.materials) committed.set(m.productId, (committed.get(m.productId) ?? 0) + m.required);
+  }
+  return (p.bom ?? []).map((l) => {
+    const c = db.products.find((x) => x.id === l.productId);
+    if (!c) throw new OpError(`A material of ${p.name} no longer exists. Edit its recipe.`);
+    const required = Math.ceil(l.quantity * quantity - 1e-9);
+    const onHand = Math.min(stockAt(db, c, locationId), availableToSell(c));
+    const available = Math.max(0, onHand - (committed.get(c.id) ?? 0));
+    return {
+      product: c,
+      perUnit: l.quantity,
+      required,
+      available,
+      shortage: Math.max(0, required - available),
+      supplier: c.supplierId ? db.suppliers.find((s) => s.id === c.supplierId) : undefined,
+    };
+  });
+}
+
+/** Most units that can be made from materials on hand. */
+export function maxProducible(db: BizPilotDB, p: Product, locationId = ''): number {
+  if (!p.bom?.length) return 0;
+  return Math.max(0, Math.min(...materialRequirements(db, p.id, 1, locationId).map((m) => Math.floor((m.available + 1e-9) / m.perUnit))));
+}
+
+export interface ProductionInput {
+  productId: string;
+  quantity: number;
+  locationId?: string | null;
+  dueDate?: string;
+  batchNumber?: string;
+  note?: string;
+}
+
+/**
+ * Plan a production run (blueprint A2 workflow steps 2–4). It waits in
+ * Approvals; materials are only taken from stock when production starts.
+ */
+export function createProductionOrder(db: BizPilotDB, input: ProductionInput, actor: string): { order: ProductionOrder; approval: ApprovalRequest } {
+  const p = db.products.find((x) => x.id === input.productId);
+  if (!p) throw new OpError('Product not found.');
+  if (!p.bom?.length) throw new OpError(`${p.name} has no recipe yet. Add the materials it is made from first.`);
+  if (!Number.isInteger(input.quantity) || input.quantity <= 0) throw new OpError('Quantity must be a whole number above 0.');
+  const locationId = input.locationId || '';
+  if (locationId && !db.locations.some((l) => l.id === locationId && l.active)) throw new OpError('Choose an active location.');
+  if (input.dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(input.dueDate)) throw new OpError('Due date must be YYYY-MM-DD.');
+  const needs = materialRequirements(db, p.id, input.quantity, locationId);
+  const orderNumber = nextNumber((db.productionOrders ?? []).map((o) => o.orderNumber), 'MO');
+  const unit = plannedUnitCost(db, p);
+  const order: ProductionOrder = {
+    id: newId(),
+    orderNumber,
+    productId: p.id,
+    quantity: input.quantity,
+    locationId,
+    status: 'pending_approval',
+    materials: needs.map((m) => ({ productId: m.product.id, required: m.required, consumed: 0, unitCost: m.product.unitCost })),
+    plannedUnitCost: unit,
+    actualUnitCost: 0,
+    labourCost: round2((p.labourCost ?? 0) * input.quantity),
+    overheadCost: round2((p.overheadCost ?? 0) * input.quantity),
+    goodQty: 0,
+    rejectedQty: 0,
+    batchNumber: input.batchNumber?.trim() || orderNumber,
+    qcNotes: '',
+    dueDate: input.dueDate ?? '',
+    note: input.note?.trim() ?? '',
+    createdAt: now(),
+    startedAt: null,
+    completedAt: null,
+    createdBy: actor,
+  };
+  db.productionOrders.unshift(order);
+  const short = needs.filter((m) => m.shortage > 0);
+  const approval = requestApproval(db, {
+    type: 'production_order',
+    title: `${orderNumber}: make ${input.quantity}× ${p.name} (≈RM${(unit * input.quantity).toFixed(2)})`,
+    description: [
+      `Materials: ${needs.map((m) => `${m.required} ${m.product.name}${m.shortage ? ` (short ${m.shortage})` : ''}`).join(', ')}.`,
+      `Planned cost RM${unit.toFixed(2)} per unit (materials RM${materialCostPerUnit(db, p).toFixed(2)}, labour RM${(p.labourCost ?? 0).toFixed(2)}, overhead RM${(p.overheadCost ?? 0).toFixed(2)}).`,
+      short.length ? `Not enough materials yet: buy them before starting (draft material POs from the production order).` : 'All materials are in stock.',
+      input.dueDate ? `Due ${input.dueDate}.` : '',
+      order.note,
+    ].filter(Boolean).join('\n'),
+    payload: { productionOrderId: order.id },
+    amount: round2(unit * input.quantity),
+  }, actor);
+  audit(db, actor, 'create', 'production_order', orderNumber, `${orderNumber}: ${input.quantity}× ${p.name} planned${short.length ? `, short of ${short.length} material(s)` : ''}`);
+  return { order, approval };
+}
+
+function findProductionOrder(db: BizPilotDB, ref: string): ProductionOrder {
+  const o = (db.productionOrders ?? []).find((x) => x.id === ref || x.orderNumber.toLowerCase() === ref.trim().toLowerCase());
+  if (!o) throw new OpError('Production order not found.');
+  return o;
+}
+
+/** On approval: the run may start once materials are in. */
+export function approveProductionOrder(db: BizPilotDB, id: string, actor: string): string {
+  const o = findProductionOrder(db, id);
+  if (o.status !== 'pending_approval') return `${o.orderNumber} is already ${o.status.replace('_', ' ')}.`;
+  o.status = 'approved';
+  const short = materialRequirements(db, o.productId, o.quantity, o.locationId, o.id).filter((m) => m.shortage > 0);
+  audit(db, actor, 'approve', 'production_order', o.orderNumber, `${o.orderNumber} approved`);
+  return `${o.orderNumber} approved.${short.length ? ` Still short of ${short.map((m) => `${m.shortage} ${m.product.name}`).join(', ')}.` : ' Ready to start.'}`;
+}
+
+/** Start production: materials leave stock now (work in progress). Refuses if anything is short. */
+export function startProduction(db: BizPilotDB, id: string, actor: string): ProductionOrder {
+  const o = findProductionOrder(db, id);
+  if (o.status === 'pending_approval') throw new OpError(`${o.orderNumber} is waiting for approval.`);
+  if (o.status !== 'approved') throw new OpError(`${o.orderNumber} is already ${o.status.replace('_', ' ')}.`);
+  const needs = materialRequirements(db, o.productId, o.quantity, o.locationId, o.id);
+  const short = needs.filter((m) => m.shortage > 0);
+  if (short.length) throw new OpError(`Not enough materials for ${o.orderNumber}: ${short.map((m) => `${m.product.name} needs ${m.required}, ${m.available} available`).join('; ')}.`);
+  o.materials = needs.map((m) => {
+    recordStockMovement(db, m.product.id, 'out', m.required, `Used in production ${o.orderNumber}`, o.orderNumber, actor, { locationId: o.locationId || null, strict: Boolean(o.locationId) });
+    return { productId: m.product.id, required: m.required, consumed: m.required, unitCost: m.product.unitCost };
+  });
+  o.status = 'in_progress';
+  o.startedAt = now();
+  audit(db, actor, 'start', 'production_order', o.orderNumber, `${o.orderNumber} started; materials taken from stock`);
+  return o;
+}
+
+export interface CompleteProductionInput {
+  goodQty: number;
+  rejectedQty?: number;
+  qcNotes?: string;
+  batchNumber?: string;
+  expiryDate?: string;
+}
+
+/**
+ * Record what was made (blueprint A2: QC, finished-goods registration, actual
+ * vs planned cost). Good units go into stock; the product's cost becomes the
+ * weighted average of existing stock and this batch.
+ */
+export function completeProduction(db: BizPilotDB, id: string, input: CompleteProductionInput, actor: string): ProductionOrder {
+  const o = findProductionOrder(db, id);
+  if (o.status !== 'in_progress') throw new OpError(`${o.orderNumber} is ${o.status.replace('_', ' ')}; only a running order can be completed.`);
+  const good = input.goodQty;
+  const rejected = input.rejectedQty ?? 0;
+  if (!Number.isInteger(good) || good < 0 || !Number.isInteger(rejected) || rejected < 0) throw new OpError('Good and rejected quantities must be whole numbers, 0 or more.');
+  if (good + rejected === 0) throw new OpError('Enter how many units were made.');
+  if (good + rejected > o.quantity) throw new OpError(`${o.orderNumber} was for ${o.quantity} units; good + rejected can't be more.`);
+  if (input.expiryDate && !/^\d{4}-\d{2}-\d{2}$/.test(input.expiryDate)) throw new OpError('Expiry date must be YYYY-MM-DD.');
+  const p = db.products.find((x) => x.id === o.productId);
+  if (!p) throw new OpError('The product of this order no longer exists.');
+  const total = o.materials.reduce((s, m) => s + m.consumed * m.unitCost, 0) + o.labourCost + o.overheadCost;
+  o.goodQty = good;
+  o.rejectedQty = rejected;
+  o.qcNotes = input.qcNotes?.trim() ?? '';
+  if (input.batchNumber?.trim()) o.batchNumber = input.batchNumber.trim();
+  o.actualUnitCost = good ? round2(total / good) : 0;
+  if (good) {
+    const before = Math.max(0, p.stock);
+    p.unitCost = round2((before * p.unitCost + good * o.actualUnitCost) / (before + good));
+    recordStockMovement(db, p.id, 'in', good, `Made in ${o.orderNumber} (batch ${o.batchNumber})`, o.orderNumber, actor, { locationId: o.locationId || null });
+    if (input.expiryDate && (!p.expiryDate || input.expiryDate < p.expiryDate)) p.expiryDate = input.expiryDate;
+  }
+  o.status = 'completed';
+  o.completedAt = now();
+  if (rejected) notify(db, `QC rejects in ${o.orderNumber}`, `${rejected} of ${good + rejected} ${p.name} rejected${o.qcNotes ? `: ${o.qcNotes}` : ''}.`, rejected / (good + rejected) > 0.1 ? 'warning' : 'info');
+  if (good && o.plannedUnitCost && o.actualUnitCost > o.plannedUnitCost * 1.05) {
+    notify(db, `Production cost over plan: ${p.name}`, `${o.orderNumber} cost RM${o.actualUnitCost.toFixed(2)} per good unit vs RM${o.plannedUnitCost.toFixed(2)} planned (${Math.round((o.actualUnitCost / o.plannedUnitCost - 1) * 100)}% over).`, 'warning');
+  }
+  audit(db, actor, 'complete', 'production_order', o.orderNumber, `${o.orderNumber}: ${good} good, ${rejected} rejected, RM${o.actualUnitCost.toFixed(2)} per unit (planned RM${o.plannedUnitCost.toFixed(2)})`);
+  return o;
+}
+
+/** Cancel a run. Materials already taken are returned to stock; write off any that were wasted with a stock-out. */
+export function cancelProduction(db: BizPilotDB, id: string, actor: string): ProductionOrder {
+  const o = findProductionOrder(db, id);
+  if (o.status === 'completed' || o.status === 'cancelled') throw new OpError(`${o.orderNumber} is already ${o.status}.`);
+  if (o.status === 'in_progress') {
+    for (const m of o.materials) {
+      if (m.consumed > 0) recordStockMovement(db, m.productId, 'in', m.consumed, `Returned from cancelled ${o.orderNumber}`, o.orderNumber, actor, { locationId: o.locationId || null });
+      m.consumed = 0;
+    }
+  }
+  o.status = 'cancelled';
+  audit(db, actor, 'cancel', 'production_order', o.orderNumber, `${o.orderNumber} cancelled`);
+  return o;
+}
+
+/**
+ * Draft purchase orders for missing materials, one per supplier, each sent
+ * to Approvals (blueprint A2 step 3: purchase requisitions for shortages).
+ */
+export function draftMaterialPurchases(db: BizPilotDB, id: string, actor: string): { purchaseOrders: PurchaseOrder[]; noSupplier: string[] } {
+  const o = findProductionOrder(db, id);
+  if (!['pending_approval', 'approved'].includes(o.status)) throw new OpError(`${o.orderNumber} is ${o.status.replace('_', ' ')}.`);
+  const bySupplier = new Map<string, PurchaseOrderLine[]>();
+  const noSupplier: string[] = [];
+  for (const m of materialRequirements(db, o.productId, o.quantity, o.locationId, o.id)) {
+    let qty = m.shortage - m.product.incoming;
+    if (qty <= 0) continue;
+    if (!m.supplier) { noSupplier.push(m.product.name); continue; }
+    const multiple = m.product.orderMultiple > 1 ? m.product.orderMultiple : 1;
+    qty = Math.max(qty, m.supplier.minOrderQty || 0);
+    qty = Math.ceil(qty / multiple) * multiple;
+    bySupplier.set(m.supplier.id, [...(bySupplier.get(m.supplier.id) ?? []), { productId: m.product.id, quantity: qty, unitCost: m.product.unitCost || m.supplier.unitCost || 0 }]);
+  }
+  const purchaseOrders: PurchaseOrder[] = [];
+  for (const [supplierId, lines] of bySupplier) {
+    const po = createPurchaseOrder(db, { supplierId, lines, note: `Materials for ${o.orderNumber}`, locationId: o.locationId || null }, actor);
+    const s = db.suppliers.find((x) => x.id === supplierId)!;
+    requestApproval(db, {
+      type: 'purchase_order',
+      title: `${po.poNumber} to ${s.name} (RM${po.totalCost.toFixed(2)})`,
+      description: lines.map((l) => `${l.quantity}× ${db.products.find((p) => p.id === l.productId)?.name} @ RM${l.unitCost}`).join('; ') + ` — materials for ${o.orderNumber}`,
+      payload: { purchaseOrderId: po.id },
+      amount: po.totalCost,
+    }, actor);
+    purchaseOrders.push(po);
+  }
+  if (!purchaseOrders.length && !noSupplier.length) throw new OpError(`Nothing to buy for ${o.orderNumber}: materials are in stock or already on order.`);
+  return { purchaseOrders, noSupplier };
 }
 
 // ---------------------------------------------------------------- suppliers & purchasing
@@ -1318,6 +1627,8 @@ export function applyApprovedAction(db: BizPilotDB, req: ApprovalRequest, actor:
     }
     case 'stock_count':
       return applyStockCount(db, String(p.countId), actor);
+    case 'production_order':
+      return approveProductionOrder(db, String(p.productionOrderId), actor);
     case 'refund': {
       const ret = db.returns.find((x) => x.id === p.returnId);
       if (!ret) throw new OpError('Return case no longer exists.');

@@ -207,6 +207,10 @@ export async function rejectApproval(businessId: string, approvalId: string, act
       const c = db.stockCounts.find((x) => x.id === (r.payload as any).countId);
       if (c && c.status === 'submitted') { c.status = 'rejected'; c.decidedAt = new Date().toISOString(); }
     }
+    if (r.type === 'production_order') {
+      const o = db.productionOrders.find((x) => x.id === (r.payload as any).productionOrderId);
+      if (o && o.status === 'pending_approval') o.status = 'cancelled';
+    }
     if (r.type === 'refund') {
       const ret = db.returns.find((x) => x.id === (r.payload as any).returnId);
       if (ret && ret.refundStatus === 'pending_approval') ret.refundStatus = 'none';

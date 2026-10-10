@@ -308,6 +308,8 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
   const bottom = useRef<HTMLDivElement>(null);
   const pending = db.approvals.filter((a) => a.status === 'pending').length;
   const active = turns.find((t) => ACTIVE.includes(t.status));
+  // WorkBuddy runs one goal at a time, maybe in another chat: the owner can still browse, type and attach meanwhile.
+  const busy = active ?? db.agentTasks.find((t) => ACTIVE.includes(t.status));
 
   const loadChats = useCallback(async () => {
     try { setChats(await api<Chat[]>('/api/agent/conversations')); } catch { /* list is optional */ }
@@ -366,12 +368,25 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
     return () => window.clearInterval(h);
   }, [activeId, reload, loadChats]);
 
+  // A goal running in another chat: watch it so sending unlocks as soon as it finishes.
+  const elsewhereId = !active && busy ? busy.id : undefined;
+  useEffect(() => {
+    if (!elsewhereId) return;
+    const h = window.setInterval(async () => {
+      try {
+        const t = await api<AgentTask>(`/api/agent/tasks/${elsewhereId}`);
+        if (!ACTIVE.includes(t.status)) { void reload(); void loadChats(); }
+      } catch { /* try again next tick */ }
+    }, 3000);
+    return () => window.clearInterval(h);
+  }, [elsewhereId, reload, loadChats]);
+
   const lastEvents = turns.length ? turns[turns.length - 1].events.length : 0;
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [turns.length, lastEvents]);
 
   const send = async (text: string) => {
     const goal = text.trim();
-    if ((!goal && !files.length) || active || reading) return;
+    if ((!goal && !files.length) || busy || reading) return;
     setSending(true);
     try {
       const attachments = files.map((f) => ({ name: f.name, kind: f.kind, size: f.size, text: f.text, images: f.images, path: f.path, note: f.note }));
@@ -426,7 +441,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
         <Card className={cn('h-fit min-w-0 lg:sticky lg:top-4', !showChats && 'hidden')}>
           <CardHeader className="pb-2">
             <div className="flex gap-1">
-              <Button className="flex-1 bg-teal-700 text-white hover:bg-teal-800" disabled={!!active} onClick={() => { void openChat(null); setPrompt(''); }}>
+              <Button className="flex-1 bg-teal-700 text-white hover:bg-teal-800" onClick={() => { asked.current = true; void openChat(null); }}>
                 <Plus className="mr-1.5 h-4 w-4" /> New chat
               </Button>
               <Button variant="outline" size="icon" title="Hide chats" onClick={() => setShowChats(false)}>
@@ -438,8 +453,8 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
             {chats.length === 0 && <p className="px-2 text-xs text-slate-500">No chats yet.</p>}
             {chats.map((c) => (
               <div key={c.id} className={cn('group flex items-start gap-1 rounded-md hover:bg-slate-50', chatId === c.id && 'bg-slate-100')}>
-                <button className="min-w-0 flex-1 px-2 py-1.5 text-left text-xs" disabled={!!active && chatId !== c.id} onClick={() => void openChat(c.id)}>
-                  <div className="line-clamp-2 text-slate-700">{c.title}</div>
+                <button className="min-w-0 flex-1 px-2 py-1.5 text-left text-xs" onClick={() => { asked.current = true; void openChat(c.id); }}>
+                  <div className="line-clamp-2 text-slate-700">{ACTIVE.includes(c.lastStatus) && <Loader2 className="mr-1 inline h-3 w-3 animate-spin text-amber-600" />}{c.title}</div>
                   <div className="mt-0.5 text-[10px] text-slate-400">{fmtDateTime(c.lastAt)} · {c.messages} message{c.messages > 1 ? 's' : ''}</div>
                 </button>
                 <button title="Delete chat" className="mt-1.5 mr-1 hidden rounded p-1 text-slate-400 hover:text-red-600 group-hover:block" onClick={() => void removeChat(c.id)}>
@@ -454,7 +469,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
           className={cn('relative flex min-h-[70vh] min-w-0 flex-col', dragging && 'ring-2 ring-teal-400')}
           onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
           onDragLeave={(e) => { if (e.currentTarget === e.target) setDragging(false); }}
-          onDrop={(e) => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDragging(false); if (!active) void addFiles(e.dataTransfer.files); }}
+          onDrop={(e) => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDragging(false); void addFiles(e.dataTransfer.files); }}
         >
           {dragging && (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-teal-50/80 text-sm font-medium text-teal-800">
@@ -466,7 +481,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
               <Button variant="outline" size="sm" onClick={() => setShowChats(true)}>
                 <PanelLeftOpen className="mr-1 h-4 w-4" /> Chats
               </Button>
-              <Button variant="ghost" size="sm" disabled={!!active} onClick={() => { void openChat(null); setPrompt(''); }}>
+              <Button variant="ghost" size="sm" onClick={() => { asked.current = true; void openChat(null); }}>
                 <Plus className="mr-1 h-4 w-4" /> New chat
               </Button>
             </div>
@@ -508,7 +523,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
             )}
             <div className="flex items-end gap-2">
               <input ref={fileInput} type="file" multiple accept={ACCEPT} className="hidden" onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }} />
-              <Button variant="outline" size="icon" className="h-10 w-10 shrink-0" title="Attach receipts, quotations, photos, videos, PDFs or spreadsheets" disabled={!!active || files.length >= MAX_FILES} onClick={() => fileInput.current?.click()}>
+              <Button variant="outline" size="icon" className="h-10 w-10 shrink-0" title="Attach receipts, quotations, photos, videos, PDFs or spreadsheets" disabled={files.length >= MAX_FILES} onClick={() => fileInput.current?.click()}>
                 <Paperclip className="h-4 w-4" />
               </Button>
               <Textarea
@@ -518,12 +533,18 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(prompt); } }}
                 onPaste={(e) => { const pasted = Array.from(e.clipboardData.files); if (pasted.length) { e.preventDefault(); void addFiles(pasted); } }}
-                disabled={!!active}
               />
-              <Button className="h-10 bg-teal-700 text-white hover:bg-teal-800" disabled={(!prompt.trim() && !files.length) || !!active || sending || reading > 0} onClick={() => void send(prompt)}>
+              <Button className="h-10 bg-teal-700 text-white hover:bg-teal-800" disabled={(!prompt.trim() && !files.length) || !!busy || sending || reading > 0} onClick={() => void send(prompt)}>
                 {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </Button>
             </div>
+            {busy && (
+              <p className="flex items-center gap-1.5 text-[11px] text-amber-700">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {active ? 'WorkBuddy is working on this chat.' : 'WorkBuddy is finishing a task in another chat.'} Keep typing and attaching; send when it is done.
+                {!active && <button className="underline" onClick={() => { asked.current = true; void openChat(busy.conversationId || busy.id); }}>Open it</button>}
+              </p>
+            )}
             <p className="text-[11px] text-slate-400">Enter to send, Shift+Enter for a new line. Attach or drop receipts, quotations, bills, order screenshots, product photos or videos: BizPilot works out what each one is and records it.</p>
           </div>
         </Card>

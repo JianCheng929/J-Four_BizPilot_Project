@@ -3,7 +3,7 @@ import { CheckCircle2, Loader2, Plus, Trash2, XCircle } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
 import { money } from '@/lib/format';
-import type { Invoice, InvoiceLine } from '@/lib/db/types';
+import type { Invoice, InvoiceLine, InvoiceRecurrence, Quotation } from '@/lib/db/types';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -21,15 +21,33 @@ interface LineForm {
   taxRate: string;
 }
 
+type Repeat = 'none' | InvoiceRecurrence['every'];
+const REPEAT_OPTIONS = [
+  { value: 'none', label: 'Does not repeat' },
+  { value: 'week', label: 'Every week' },
+  { value: 'month', label: 'Every month' },
+  { value: 'quarter', label: 'Every 3 months' },
+  { value: 'year', label: 'Every year' },
+];
+
+/** Invoices and quotations share this form; `quotation` mode saves a quotation instead. */
 export function InvoiceDialog({
   open,
   onOpenChange,
   invoice,
+  quotation,
+  mode = 'invoice',
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   invoice?: Invoice | null;
+  quotation?: Quotation | null;
+  mode?: 'invoice' | 'quotation';
 }) {
+  const isQuote = mode === 'quotation';
+  const [validDays, setValidDays] = useState('14');
+  const [note, setNote] = useState('');
+  const [repeat, setRepeat] = useState<Repeat>('none');
   const { db, run, callServer } = useBizPilot();
   const defaultRate = String(db.settings.defaultTaxRate ?? 0);
   const [buyerType, setBuyerType] = useState<'individual' | 'business'>('individual');
@@ -45,7 +63,12 @@ export function InvoiceDialog({
     if (!open) return;
     setError(null);
     setTinCheck(null);
-    if (invoice) {
+    const source = isQuote ? quotation : invoice;
+    setRepeat(!isQuote && invoice?.recurrence?.active ? invoice.recurrence.every : 'none');
+    setNote(quotation?.note ?? '');
+    setValidDays(quotation ? String(Math.max(1, Math.round((new Date(quotation.validUntil).getTime() - new Date(quotation.issuedDate).getTime()) / 86400000))) : '14');
+    if (source) {
+      const invoice = source;
       const isBiz = !!invoice.customerTin && invoice.customerTin !== GENERAL_PUBLIC_TIN;
       setBuyerType(isBiz ? 'business' : 'individual');
       setC({
@@ -56,7 +79,7 @@ export function InvoiceDialog({
         tin: isBiz ? invoice.customerTin : '',
         brn: invoice.customerBrn,
       });
-      const days = Math.max(0, Math.round((new Date(invoice.dueDate).getTime() - new Date(invoice.issuedDate).getTime()) / 86400000));
+      const days = 'paymentDays' in invoice ? invoice.paymentDays : Math.max(0, Math.round((new Date(invoice.dueDate).getTime() - new Date(invoice.issuedDate).getTime()) / 86400000));
       setDueDays(String(days));
       setLines(
         invoice.lines.map((l) => ({
@@ -74,7 +97,7 @@ export function InvoiceDialog({
       setLines([{ productId: NONE, description: '', quantity: '1', unitPrice: '', taxRate: defaultRate }]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, invoice]);
+  }, [open, invoice, quotation]);
 
   const setLine = (i: number, patch: Partial<LineForm>) => setLines((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
@@ -122,6 +145,17 @@ export function InvoiceDialog({
       customerTin: buyerType === 'business' ? c.tin.trim() : GENERAL_PUBLIC_TIN,
       customerBrn: buyerType === 'business' ? c.brn.trim() : '',
     };
+    const every = repeat === 'none' ? null : repeat;
+    if (isQuote) {
+      const vd = num(validDays);
+      if (!(vd >= 1)) return setError('Valid for must be at least 1 day.');
+      const input = { ...buyer, lines: parsedLines, validDays: vd, paymentDays: due, note };
+      const r = quotation
+        ? run((d, a) => ops.updateQuotation(d, quotation.id, input, a), 'Quotation updated')
+        : run((d, a) => ops.createQuotation(d, input, a), 'Draft quotation created');
+      if (r) onOpenChange(false);
+      return;
+    }
     const res = invoice
       ? run((d, a) => {
           const inv = d.invoices.find((x) => x.id === invoice.id);
@@ -133,9 +167,14 @@ export function InvoiceDialog({
             dueDate: new Date(new Date(inv.issuedDate).getTime() + due * 86400000).toISOString(),
           });
           ops.audit(d, a, 'update', 'invoice', inv.invoiceNumber, `Draft ${inv.invoiceNumber} edited (${money(inv.total)})`);
+          if (!inv.recurringFrom && (every ?? null) !== (inv.recurrence?.active ? inv.recurrence.every : null)) ops.setInvoiceRecurrence(d, inv.id, every, a);
           return inv;
         }, 'Invoice updated')
-      : run((d, a) => ops.createInvoice(d, { ...buyer, lines: parsedLines, dueDays: due }, a), 'Draft invoice created');
+      : run((d, a) => {
+          const inv = ops.createInvoice(d, { ...buyer, lines: parsedLines, dueDays: due }, a);
+          if (every) ops.setInvoiceRecurrence(d, inv.id, every, a);
+          return inv;
+        }, every ? 'Draft invoice created; copies will be made on schedule' : 'Draft invoice created');
     if (res) onOpenChange(false);
   };
 
@@ -143,8 +182,14 @@ export function InvoiceDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className={dialogXL}>
         <DialogHeader>
-          <DialogTitle>{invoice ? `Edit ${invoice.invoiceNumber}` : 'New invoice'}</DialogTitle>
-          <DialogDescription>Saved as a draft. Issuing it to the customer goes through Approvals.</DialogDescription>
+          <DialogTitle>
+            {isQuote ? (quotation ? `Edit ${quotation.quoteNumber}` : 'New quotation') : invoice ? `Edit ${invoice.invoiceNumber}` : 'New invoice'}
+          </DialogTitle>
+          <DialogDescription>
+            {isQuote
+              ? 'Saved as a draft. Sending it goes through Approvals; once the customer accepts, turn it into an invoice in one click.'
+              : 'Saved as a draft. Issuing it to the customer goes through Approvals.'}
+          </DialogDescription>
         </DialogHeader>
 
         <Tabs value={buyerType} onValueChange={(v) => setBuyerType(v as 'individual' | 'business')}>
@@ -262,10 +307,26 @@ export function InvoiceDialog({
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <Field label="Payment terms (days)">
             <Input type="number" min="0" value={dueDays} onChange={(e) => setDueDays(e.target.value)} />
           </Field>
+          {isQuote ? (
+            <>
+              <Field label="Valid for (days)">
+                <Input type="number" min="1" value={validDays} onChange={(e) => setValidDays(e.target.value)} />
+              </Field>
+              <Field label="Note to customer" hint="e.g. delivery time, what is included">
+                <Input value={note} onChange={(e) => setNote(e.target.value)} />
+              </Field>
+            </>
+          ) : (
+            !invoice?.recurringFrom && (
+              <Field label="Repeat" hint={repeat === 'none' ? 'For rent, retainers, subscriptions' : 'A new draft is made each period and sent to Approvals'}>
+                <SimpleSelect value={repeat} onChange={(v) => setRepeat(v as Repeat)} options={REPEAT_OPTIONS} />
+              </Field>
+            )
+          )}
         </div>
         {error && <div className="text-xs text-red-600">{error}</div>}
         <DialogFooter>
@@ -273,7 +334,7 @@ export function InvoiceDialog({
             Cancel
           </Button>
           <Button className={primaryBtn} onClick={save}>
-            {invoice ? 'Save draft' : 'Create draft invoice'}
+            {isQuote ? (quotation ? 'Save draft' : 'Create draft quotation') : invoice ? 'Save draft' : 'Create draft invoice'}
           </Button>
         </DialogFooter>
       </DialogContent>

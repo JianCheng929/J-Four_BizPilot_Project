@@ -30,7 +30,7 @@ export function CashFlowTab() {
         </div>
       )}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Kpi icon={Wallet} tone={p.balance < 0 ? 'red' : 'teal'} label="Money available now" value={money(p.balance)} hint={`Capital ${money(p.capital)} + sales ${money(p.salesIn)} − expenses ${money(p.expensesOut)} − purchases ${money(p.purchasesOut)}`} />
+        <Kpi icon={Wallet} tone={p.balance < 0 ? 'red' : 'teal'} label="Money available now" value={money(p.balance)} hint={`Capital ${money(p.capital)} + sales & paid invoices ${money(p.salesIn)} − expenses ${money(p.expensesOut)} − purchases ${money(p.purchasesOut)}`} />
         <Kpi icon={ArrowDownLeft} label={`Expected in (${days} days)`} value={money(f.totalIn)} hint={`${f.inItems.length} unpaid invoice(s)`} />
         <Kpi icon={ArrowUpRight} tone="amber" label={`Expected out (${days} days)`} value={money(f.totalOut)} hint={`${f.outItems.length} bill(s) and planned purchase(s)`} />
         <Kpi icon={TrendingUp} tone={f.lowCash ? 'red' : 'slate'} label={`Projected in ${days} days`} value={money(f.projected)} hint={`Worst case ${money(f.worstCase)}`} />

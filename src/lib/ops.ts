@@ -7,6 +7,8 @@ import type {
   Expense,
   Invoice,
   InvoiceLine,
+  InvoiceRecurrence,
+  Quotation,
   Location,
   StockCount,
   StockTransfer,
@@ -1401,6 +1403,263 @@ export function refreshOverdue(db: BizPilotDB) {
   }
 }
 
+// ---------------------------------------------------------------- quotations, reminders, recurring invoices (blueprint D5)
+
+export interface QuotationInput {
+  customerName: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  customerAddress?: string;
+  customerTin?: string;
+  customerBrn?: string;
+  lines: InvoiceLine[];
+  validDays?: number;
+  paymentDays?: number;
+  note?: string;
+}
+
+function checkLines(lines: InvoiceLine[]) {
+  if (!lines.length) throw new OpError('Add at least one line.');
+  for (const l of lines) {
+    if (!l.description?.trim()) throw new OpError('Every line needs a description.');
+    if (!(l.quantity > 0)) throw new OpError('Quantities must be above 0.');
+    if (!(l.unitPrice >= 0)) throw new OpError('Unit prices must be 0 or more.');
+  }
+}
+
+export function createQuotation(db: BizPilotDB, input: QuotationInput, actor: string): Quotation {
+  if (!input.customerName?.trim()) throw new OpError('Customer name is required.');
+  checkLines(input.lines);
+  const validDays = input.validDays ?? 14;
+  if (!(validDays >= 1)) throw new OpError('A quotation must be valid for at least 1 day.');
+  const q: Quotation = {
+    id: newId(),
+    quoteNumber: nextNumber(db.quotations.map((x) => x.quoteNumber), 'QT'),
+    customerName: input.customerName.trim(),
+    customerEmail: input.customerEmail?.trim() ?? '',
+    customerPhone: input.customerPhone?.trim() ?? '',
+    customerAddress: input.customerAddress?.trim() ?? '',
+    customerTin: input.customerTin?.trim() ?? '',
+    customerBrn: input.customerBrn?.trim() ?? '',
+    lines: input.lines.map((l) => ({ ...l, description: l.description.trim(), classificationCode: l.classificationCode ?? '022' })),
+    ...invoiceTotals(input.lines),
+    status: 'draft',
+    issuedDate: now(),
+    validUntil: new Date(Date.now() + validDays * DAY).toISOString(),
+    paymentDays: Math.max(0, Math.round(input.paymentDays ?? 30)),
+    note: input.note?.trim() ?? '',
+    invoiceId: null,
+    createdBy: actor,
+  };
+  db.quotations.unshift(q);
+  audit(db, actor, 'create', 'quotation', q.quoteNumber, `Quotation ${q.quoteNumber} for ${q.customerName} RM${q.total.toFixed(2)}`);
+  return q;
+}
+
+export function findQuotation(db: BizPilotDB, ref: string): Quotation {
+  const r = ref.trim().toLowerCase();
+  const q = db.quotations.find((x) => x.id === ref || x.quoteNumber.toLowerCase() === r);
+  if (!q) throw new OpError('Quotation not found.');
+  return q;
+}
+
+/** Edit a quotation that has not been sent yet. */
+export function updateQuotation(db: BizPilotDB, id: string, input: QuotationInput, actor: string): Quotation {
+  const q = findQuotation(db, id);
+  if (q.status !== 'draft') throw new OpError(`${q.quoteNumber} is ${q.status}; only drafts can be edited.`);
+  if (!input.customerName?.trim()) throw new OpError('Customer name is required.');
+  checkLines(input.lines);
+  Object.assign(q, {
+    customerName: input.customerName.trim(),
+    customerEmail: input.customerEmail?.trim() ?? '',
+    customerPhone: input.customerPhone?.trim() ?? '',
+    customerAddress: input.customerAddress?.trim() ?? '',
+    customerTin: input.customerTin?.trim() ?? '',
+    customerBrn: input.customerBrn?.trim() ?? '',
+    lines: input.lines.map((l) => ({ ...l, description: l.description.trim(), classificationCode: l.classificationCode ?? '022' })),
+    ...invoiceTotals(input.lines),
+    validUntil: new Date(new Date(q.issuedDate).getTime() + (input.validDays ?? 14) * DAY).toISOString(),
+    paymentDays: Math.max(0, Math.round(input.paymentDays ?? q.paymentDays)),
+    note: input.note?.trim() ?? q.note,
+  });
+  audit(db, actor, 'update', 'quotation', q.quoteNumber, `Draft ${q.quoteNumber} edited (RM${q.total.toFixed(2)})`);
+  return q;
+}
+
+/** Record that the quotation went to the customer (by email after approval, or sent by hand). */
+export function markQuotationSent(db: BizPilotDB, id: string, actor: string): Quotation {
+  const q = findQuotation(db, id);
+  if (q.status !== 'draft') throw new OpError(`${q.quoteNumber} is already ${q.status}.`);
+  q.status = 'sent';
+  q.issuedDate = now();
+  audit(db, actor, 'send', 'quotation', q.quoteNumber, `${q.quoteNumber} sent to ${q.customerName}`);
+  return q;
+}
+
+export function requestQuotationSend(db: BizPilotDB, id: string, actor: string): ApprovalRequest {
+  const q = findQuotation(db, id);
+  if (q.status !== 'draft') throw new OpError(`${q.quoteNumber} is already ${q.status}.`);
+  if (db.approvals.some((a) => a.status === 'pending' && a.type === 'quotation_send' && a.payload.quotationId === q.id)) throw new OpError(`${q.quoteNumber} is already waiting in Approvals.`);
+  return requestApproval(db, {
+    type: 'quotation_send',
+    title: `Send quotation ${q.quoteNumber} to ${q.customerName} (RM${q.total.toFixed(2)})`,
+    description: `${q.lines.map((l) => `${l.quantity}× ${l.description} @ RM${l.unitPrice}`).join('; ')}. Valid until ${q.validUntil.slice(0, 10)}.` +
+      (q.customerEmail ? ` Will be emailed to ${q.customerEmail}.` : ' No customer email: approve, then share the PDF yourself.'),
+    payload: { quotationId: q.id },
+    amount: q.total,
+    risk: 'low',
+  }, actor);
+}
+
+export function setQuotationOutcome(db: BizPilotDB, id: string, outcome: 'accepted' | 'declined', actor: string): Quotation {
+  const q = findQuotation(db, id);
+  if (q.status === 'converted' || q.status === outcome) throw new OpError(`${q.quoteNumber} is already ${q.status}.`);
+  q.status = outcome;
+  audit(db, actor, outcome, 'quotation', q.quoteNumber, `${q.quoteNumber} ${outcome} by ${q.customerName}`);
+  return q;
+}
+
+/** An accepted quotation becomes a draft invoice with the same customer, lines and payment terms. */
+export function convertQuotationToInvoice(db: BizPilotDB, id: string, actor: string): Invoice {
+  const q = findQuotation(db, id);
+  if (q.status === 'converted') throw new OpError(`${q.quoteNumber} is already invoiced.`);
+  if (q.status === 'declined') throw new OpError(`${q.quoteNumber} was declined.`);
+  const inv = createInvoice(db, {
+    customerName: q.customerName, customerEmail: q.customerEmail, customerPhone: q.customerPhone, customerAddress: q.customerAddress,
+    customerTin: q.customerTin, customerBrn: q.customerBrn, lines: q.lines, dueDays: q.paymentDays,
+  }, actor);
+  inv.quotationId = q.id;
+  q.status = 'converted';
+  q.invoiceId = inv.id;
+  audit(db, actor, 'convert', 'quotation', q.quoteNumber, `${q.quoteNumber} accepted and turned into ${inv.invoiceNumber}`);
+  return inv;
+}
+
+/** Drafts and sent quotations past their valid-until date become expired. */
+export function refreshExpiredQuotations(db: BizPilotDB) {
+  for (const q of db.quotations) {
+    if ((q.status === 'draft' || q.status === 'sent') && new Date(q.validUntil).getTime() < Date.now() - DAY) q.status = 'expired';
+  }
+}
+
+/** Polite first, firmer later (blueprint D5 payment reminders). */
+export function reminderText(db: BizPilotDB, inv: Invoice): { subject: string; body: string } {
+  const s = db.settings;
+  const from = s.legalName || s.name || 'us';
+  const late = Math.floor((Date.now() - new Date(inv.dueDate).getTime()) / DAY);
+  const n = inv.remindersSent ?? 0;
+  const amount = `RM${inv.total.toFixed(2)}`;
+  const due = inv.dueDate.slice(0, 10);
+  const contact = [s.phone, s.email].filter(Boolean).join(' or ');
+  const opening = late <= 0
+    ? `This is a friendly reminder that invoice ${inv.invoiceNumber} for ${amount} is due on ${due}.`
+    : n === 0
+      ? `Our records show invoice ${inv.invoiceNumber} for ${amount}, due on ${due}, is still unpaid (${late} day${late === 1 ? '' : 's'} overdue). It may simply have been missed.`
+      : n === 1
+        ? `This is a second reminder: invoice ${inv.invoiceNumber} for ${amount} was due on ${due} and is now ${late} days overdue.`
+        : `Invoice ${inv.invoiceNumber} for ${amount} is now ${late} days overdue despite earlier reminders. Please settle it as soon as possible or contact us to agree a payment date.`;
+  return {
+    subject: `${late > 0 ? 'Overdue: ' : 'Reminder: '}invoice ${inv.invoiceNumber} from ${from}`,
+    body: [
+      `Dear ${inv.customerName},`,
+      '',
+      opening,
+      'If you have already paid, please ignore this message and accept our thanks.',
+      contact ? `For any questions, contact us at ${contact}.` : '',
+      '',
+      `Thank you,`,
+      from,
+    ].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
+  };
+}
+
+/** Draft a payment reminder and send it to Approvals; it is emailed (or shown to copy) once approved. */
+export function requestPaymentReminder(db: BizPilotDB, invoiceId: string, actor: string, text?: { subject?: string; body?: string }): ApprovalRequest {
+  const inv = db.invoices.find((i) => i.id === invoiceId || i.invoiceNumber.toLowerCase() === invoiceId.trim().toLowerCase());
+  if (!inv) throw new OpError('Invoice not found.');
+  if (inv.status !== 'issued' && inv.status !== 'overdue') throw new OpError(`${inv.invoiceNumber} is ${inv.status}; only unpaid issued invoices get reminders.`);
+  if (db.approvals.some((a) => a.status === 'pending' && a.type === 'payment_reminder' && a.payload.invoiceId === inv.id)) throw new OpError(`A reminder for ${inv.invoiceNumber} is already waiting in Approvals.`);
+  const t = reminderText(db, inv);
+  const subject = text?.subject?.trim() || t.subject;
+  const body = text?.body?.trim() || t.body;
+  return requestApproval(db, {
+    type: 'payment_reminder',
+    title: `Payment reminder ${(inv.remindersSent ?? 0) + 1} for ${inv.invoiceNumber} to ${inv.customerName} (RM${inv.total.toFixed(2)})`,
+    description: `${inv.customerEmail ? `Email to ${inv.customerEmail}` : 'No customer email: copy the text and send it by WhatsApp or SMS'}.\n\nSubject: ${subject}\n\n${body}`,
+    payload: { invoiceId: inv.id, to: inv.customerEmail, subject, body },
+    amount: inv.total,
+    risk: 'low',
+  }, actor);
+}
+
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+function addPeriod(date: string, every: InvoiceRecurrence['every']): string {
+  const d = new Date(`${date.slice(0, 10)}T00:00:00Z`);
+  if (every === 'week') d.setUTCDate(d.getUTCDate() + 7);
+  else {
+    const months = every === 'month' ? 1 : every === 'quarter' ? 3 : 12;
+    const day = d.getUTCDate();
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() + months);
+    const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    d.setUTCDate(Math.min(day, last));
+  }
+  return isoDay(d);
+}
+
+/** Repeat an invoice every week, month, quarter or year; null stops it. */
+export function setInvoiceRecurrence(db: BizPilotDB, invoiceId: string, every: InvoiceRecurrence['every'] | null, actor: string, startDate?: string): Invoice {
+  const inv = db.invoices.find((i) => i.id === invoiceId);
+  if (!inv) throw new OpError('Invoice not found.');
+  if (!every) {
+    if (inv.recurrence?.active) {
+      inv.recurrence = { ...inv.recurrence, active: false };
+      audit(db, actor, 'update', 'invoice', inv.invoiceNumber, `${inv.invoiceNumber} stopped repeating`);
+    }
+    return inv;
+  }
+  if (inv.type !== 'invoice') throw new OpError('Only normal invoices can repeat.');
+  if (inv.status === 'cancelled') throw new OpError(`${inv.invoiceNumber} is cancelled.`);
+  if (inv.recurringFrom) throw new OpError(`${inv.invoiceNumber} is a copy of a repeating invoice; change the original instead.`);
+  if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw new OpError('Next date must be YYYY-MM-DD.');
+  inv.recurrence = { every, nextDate: startDate || addPeriod(inv.issuedDate, every), active: true };
+  audit(db, actor, 'update', 'invoice', inv.invoiceNumber, `${inv.invoiceNumber} repeats every ${every}, next on ${inv.recurrence.nextDate}`);
+  return inv;
+}
+
+/**
+ * Make the copies of repeating invoices that are due (run daily by the
+ * server). Each copy is a draft that goes to Approvals to be issued. Missed
+ * periods (server asleep) produce one copy, not a burst.
+ */
+export function runRecurringInvoices(db: BizPilotDB, actor: string, today = isoDay(new Date())): Invoice[] {
+  const made: Invoice[] = [];
+  for (const src of [...db.invoices]) {
+    const r = src.recurrence;
+    if (!r?.active || r.nextDate > today || src.status === 'cancelled') continue;
+    const terms = Math.max(0, Math.round((new Date(src.dueDate).getTime() - new Date(src.issuedDate).getTime()) / DAY));
+    const copy = createInvoice(db, {
+      customerName: src.customerName, customerEmail: src.customerEmail, customerPhone: src.customerPhone, customerAddress: src.customerAddress,
+      customerTin: src.customerTin, customerBrn: src.customerBrn, lines: src.lines, dueDays: terms,
+    }, actor);
+    copy.recurringFrom = src.id;
+    requestApproval(db, {
+      type: 'invoice_issue',
+      title: `Issue ${copy.invoiceNumber} to ${copy.customerName} (RM${copy.total.toFixed(2)}), repeat of ${src.invoiceNumber}`,
+      description: `Every ${r.every}. ${copy.lines.length} line(s), subtotal RM${copy.subtotal.toFixed(2)} + tax RM${copy.taxTotal.toFixed(2)}.${copy.customerEmail ? ` Will be sent to ${copy.customerEmail}.` : ''}`,
+      payload: { invoiceId: copy.id },
+      amount: copy.total,
+      risk: 'low',
+    }, actor);
+    let next = r.nextDate;
+    while (next <= today) next = addPeriod(next, r.every);
+    src.recurrence = { ...r, nextDate: next };
+    made.push(copy);
+  }
+  return made;
+}
+
 // ---------------------------------------------------------------- expenses
 
 export function addExpense(db: BizPilotDB, e: Omit<Expense, 'id'>, actor: string): Expense {
@@ -1629,6 +1888,20 @@ export function applyApprovedAction(db: BizPilotDB, req: ApprovalRequest, actor:
       return applyStockCount(db, String(p.countId), actor);
     case 'production_order':
       return approveProductionOrder(db, String(p.productionOrderId), actor);
+    case 'payment_reminder': {
+      const inv = db.invoices.find((x) => x.id === p.invoiceId);
+      if (!inv) throw new OpError('Invoice no longer exists.');
+      inv.remindersSent = (inv.remindersSent ?? 0) + 1;
+      inv.lastReminderAt = now();
+      audit(db, actor, 'remind', 'invoice', inv.invoiceNumber, `Payment reminder ${inv.remindersSent} ${external.sentTo ? `emailed to ${external.sentTo}` : 'approved for manual sending'}`);
+      return external.sentTo
+        ? `Reminder emailed to ${external.sentTo}.`
+        : 'Reminder approved. No email was sent (no customer email, or email is not set up in Settings): copy the text above and send it by WhatsApp or SMS.';
+    }
+    case 'quotation_send': {
+      const q = markQuotationSent(db, String(p.quotationId), actor);
+      return external.sentTo ? `${q.quoteNumber} emailed to ${external.sentTo}.` : `${q.quoteNumber} marked as sent. Print it as PDF from Finance → Quotations and share it with the customer.`;
+    }
     case 'refund': {
       const ret = db.returns.find((x) => x.id === p.returnId);
       if (!ret) throw new OpError('Return case no longer exists.');

@@ -8,7 +8,7 @@ import { sendMail } from '../providers/smtp.ts';
 import { isConfigured, providerContext } from './integrations.ts';
 import { HttpError } from './http.ts';
 import { readSnapshot, withBusiness } from './workspace.ts';
-import { invoiceHtml, invoiceText, purchaseOrderText } from './documents.ts';
+import { invoiceHtml, invoiceText, purchaseOrderText, quotationHtml, quotationText } from './documents.ts';
 
 async function ctxOf(businessId: string, id: string) {
   const p = getProvider(id)!;
@@ -75,6 +75,22 @@ async function externalEffect(businessId: string, db: BizPilotDB, req: ApprovalR
     case 'customer_message': {
       const { ctx } = await ctxOf(businessId, 'smtp');
       const r = await sendMail(ctx, { to: String(p.to ?? ''), subject: String(p.subject ?? `Message from ${db.settings.name}`), text: String(p.body ?? '') });
+      return { sentTo: r.sentTo };
+    }
+    case 'payment_reminder': {
+      if (!p.to) return {};
+      const { ctx, ready } = await ctxOf(businessId, 'smtp');
+      if (!ready) return {};
+      const r = await sendMail(ctx, { to: String(p.to), subject: String(p.subject ?? ''), text: String(p.body ?? '') });
+      return { sentTo: r.sentTo };
+    }
+    case 'quotation_send': {
+      const q = db.quotations.find((x) => x.id === p.quotationId);
+      if (!q) throw new HttpError(400, 'Quotation no longer exists.');
+      if (!q.customerEmail) return {};
+      const { ctx, ready } = await ctxOf(businessId, 'smtp');
+      if (!ready) return {};
+      const r = await sendMail(ctx, { to: q.customerEmail, subject: `Quotation ${q.quoteNumber} from ${db.settings.name}`, text: quotationText(q, db.settings), html: quotationHtml(q, db.settings) });
       return { sentTo: r.sentTo };
     }
     case 'review_response': {

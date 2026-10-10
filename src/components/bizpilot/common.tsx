@@ -216,6 +216,7 @@ export function statusTone(status: string | null | undefined): string {
     case 'negative':
     case 'high':
     case 'refunded':
+    case 'declined':
       return 'red';
     case 'ordered':
     case 'scheduled':

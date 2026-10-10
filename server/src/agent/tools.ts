@@ -590,6 +590,71 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         return afterApproval(req);
       })),
 
+    tool('create_quotation', 'Create a draft quotation (price offer) for a customer. send=true also asks the owner to approve sending it (emailed if email is connected). When the customer accepts, use quotation_outcome.',
+      { customerName: z.string(), customerEmail: z.string().optional(), customerPhone: z.string().optional(), customerAddress: z.string().optional(), customerTin: z.string().optional(), customerBrn: z.string().optional(),
+        lines: z.array(z.object({ product: z.string().optional().describe('Product id/SKU/name to price from the catalogue'), description: z.string().optional(), quantity: z.number().positive(), unitPrice: z.number().nonnegative().optional(), taxRate: z.number().min(0).max(100).optional() })).min(1),
+        validDays: z.number().int().positive().optional(), paymentDays: z.number().int().nonnegative().optional(), note: z.string().optional(), send: z.boolean().optional() },
+      write(async ({ lines, send, ...buyer }) => {
+        const { q, req } = await withBusiness(businessId, (db) => {
+          const q = ops.createQuotation(db, {
+            ...buyer,
+            lines: lines.map((l) => {
+              const p = l.product ? ops.requireProduct(db, l.product) : undefined;
+              const description = l.description ?? p?.name;
+              if (!description) throw new ops.OpError('Each line needs a product or a description.');
+              if (l.unitPrice === undefined && !p) throw new ops.OpError(`Give a unit price for "${description}".`);
+              return { description, quantity: l.quantity, unitPrice: l.unitPrice ?? p!.price, taxRate: l.taxRate ?? db.settings.defaultTaxRate, productId: p?.id ?? null };
+            }),
+          }, ACTOR);
+          return { q, req: send ? ops.requestQuotationSend(db, q.id, ACTOR) : null };
+        });
+        emit({ kind: 'artifact', text: `Quotation ${q.quoteNumber} for ${q.customerName}: RM${q.total.toFixed(2)}` });
+        return { quoteNumber: q.quoteNumber, total: q.total, validUntil: q.validUntil.slice(0, 10), approval: req ? await afterApproval(req) : null };
+      })),
+
+    tool('quotation_outcome', 'Record the customer\'s answer to a quotation. accepted creates a draft invoice with the same lines (then request_invoice_issue). Only when the owner or customer confirmed it.',
+      { quotation: z.string().describe('Quotation number, e.g. QT-00001'), outcome: z.enum(['accepted', 'declined']) },
+      write(async ({ quotation, outcome }) => withBusiness(businessId, (db) => {
+        if (outcome === 'declined') return { quoteNumber: ops.setQuotationOutcome(db, quotation, 'declined', ACTOR).quoteNumber, status: 'declined' };
+        const inv = ops.convertQuotationToInvoice(db, quotation, ACTOR);
+        return { status: 'converted', draftInvoice: inv.invoiceNumber, total: inv.total };
+      }))),
+
+    tool('list_quotations', 'Quotations with status (draft, sent, accepted, declined, expired, converted), value and expiry.', { status: z.string().optional() },
+      safe(async ({ status }) => {
+        const db = await readSnapshot(businessId);
+        return db.quotations.filter((q) => !status || q.status === status).slice(0, 50).map((q) => ({ number: q.quoteNumber, customer: q.customerName, total: q.total, status: q.status, validUntil: q.validUntil.slice(0, 10), invoice: q.invoiceId ? db.invoices.find((i) => i.id === q.invoiceId)?.invoiceNumber : null }));
+      })),
+
+    tool('get_receivables_payables', 'Accounts receivable and payable ageing: who owes the business money and which bills it owes, split into not due / 1–30 / 31–60 / 61–90 / over 90 days late, with invoice numbers and reminders already sent.', {},
+      safe(async () => {
+        const db = await readSnapshot(businessId);
+        const ar = m.receivablesAgeing(db);
+        const ap = m.payablesAgeing(db);
+        const buckets = m.AGEING_BUCKETS;
+        const by = (a: number[]) => Object.fromEntries(buckets.map((b, i) => [b, a[i]]));
+        return {
+          receivables: { total: ar.total, overdue: ar.overdue, byAge: by(ar.totals), customers: ar.rows.slice(0, 25).map((r) => ({ customer: r.name, total: r.total, oldestDaysLate: r.oldestDaysLate, invoices: r.items.map((i) => ({ number: i.invoiceNumber, total: i.total, due: i.dueDate.slice(0, 10), remindersSent: i.remindersSent ?? 0, lastReminder: i.lastReminderAt?.slice(0, 10) ?? null, email: i.customerEmail || null })) })) },
+          payables: { total: ap.total, overdue: ap.overdue, byAge: by(ap.totals), bills: ap.rows.slice(0, 25).map((r) => ({ payee: r.name, total: r.total, oldestDaysLate: r.oldestDaysLate })) },
+        };
+      })),
+
+    tool('send_payment_reminder', 'Draft a payment reminder for an unpaid issued invoice and send it for approval (emailed if the customer has an email and email is connected; otherwise the owner copies it to WhatsApp). Wording gets firmer with each reminder; you may pass your own subject/body.',
+      { invoice: z.string(), subject: z.string().optional(), body: z.string().optional() },
+      write(async ({ invoice, subject, body }) => {
+        const req = await withBusiness(businessId, (db) => ops.requestPaymentReminder(db, invoice, ACTOR, { subject, body }));
+        return afterApproval(req);
+      })),
+
+    tool('set_recurring_invoice', 'Make an invoice repeat (rent, retainers, subscriptions) every week, month, quarter or year, or stop it with "none". Each copy is a draft sent to the owner for approval.',
+      { invoice: z.string(), every: z.enum(['none', 'week', 'month', 'quarter', 'year']), nextDate: z.string().optional().describe('YYYY-MM-DD of the next copy; default one period after the invoice date') },
+      write(async ({ invoice, every, nextDate }) => withBusiness(businessId, (db) => {
+        const inv = db.invoices.find((i) => i.id === invoice || i.invoiceNumber === invoice);
+        if (!inv) throw new ops.OpError('Invoice not found.');
+        const r = ops.setInvoiceRecurrence(db, inv.id, every === 'none' ? null : every, ACTOR, nextDate);
+        return { invoiceNumber: r.invoiceNumber, recurrence: r.recurrence ?? null };
+      }))),
+
     tool('request_einvoice_submit', 'Ask the owner to approve submitting an invoice to LHDN MyInvois.',
       { invoice: z.string() },
       write(async ({ invoice }) => {

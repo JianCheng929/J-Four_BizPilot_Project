@@ -155,6 +155,8 @@ export function InvoicesTab({ viewId, onView }: { viewId: string | null; onView:
                         {inv.invoiceNumber}
                       </button>
                       {inv.type !== 'invoice' && <div className="text-[11px] text-slate-400">{inv.type.replace('_', ' ')}</div>}
+                      {inv.recurrence?.active && <div className="text-[11px] text-teal-700">repeats every {inv.recurrence.every}, next {fmtDate(inv.recurrence.nextDate)}</div>}
+                      {inv.recurringFrom && <div className="text-[11px] text-slate-400">repeat of {db.invoices.find((x) => x.id === inv.recurringFrom)?.invoiceNumber ?? 'an invoice'}</div>}
                     </TableCell>
                     <TableCell className="text-sm">
                       {inv.customerName}
@@ -166,6 +168,7 @@ export function InvoicesTab({ viewId, onView }: { viewId: string | null; onView:
                     <TableCell>
                       <StatusPill status={inv.status} />
                       {issuePending && <div className="mt-0.5 text-[11px] text-amber-700">awaiting approval</div>}
+                      {(inv.remindersSent ?? 0) > 0 && <div className="mt-0.5 text-[11px] text-slate-400">{inv.remindersSent} reminder(s){inv.lastReminderAt ? `, last ${fmtDate(inv.lastReminderAt)}` : ''}</div>}
                     </TableCell>
                     <TableCell className="text-xs">
                       <StatusPill status={e.status} label={EINV_LABEL[e.status]} />
@@ -191,8 +194,21 @@ export function InvoicesTab({ viewId, onView }: { viewId: string | null; onView:
                             </>
                           )}
                           {(inv.status === 'issued' || inv.status === 'overdue') && (
-                            <DropdownMenuItem onClick={() => run((d, a) => ops.markInvoicePaid(d, inv.id, a), `${inv.invoiceNumber} marked paid`)}>
-                              Mark paid
+                            <>
+                              <DropdownMenuItem onClick={() => run((d, a) => ops.markInvoicePaid(d, inv.id, a), `${inv.invoiceNumber} marked paid`)}>
+                                Mark paid
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={hasPendingApproval(db, 'payment_reminder', 'invoiceId', inv.id)}
+                                onClick={() => run((d, a) => ops.requestPaymentReminder(d, inv.id, a), 'Reminder sent to Approvals')}
+                              >
+                                {hasPendingApproval(db, 'payment_reminder', 'invoiceId', inv.id) ? 'Reminder awaiting approval' : 'Send payment reminder'}
+                              </DropdownMenuItem>
+                            </>
+                          )}
+                          {inv.recurrence?.active && (
+                            <DropdownMenuItem onClick={() => run((d, a) => ops.setInvoiceRecurrence(d, inv.id, null, a), `${inv.invoiceNumber} stopped repeating`)}>
+                              Stop repeating
                             </DropdownMenuItem>
                           )}
                           {inv.status !== 'draft' && inv.status !== 'cancelled' && (

@@ -1,5 +1,7 @@
 import type {
   BizPilotDB,
+  Expense,
+  Invoice,
   Product,
   SalesOrder,
   Review,
@@ -241,8 +243,13 @@ export interface CashPosition {
  * from Settings, plus paid sales, minus paid expenses and placed purchase orders.
  * Stock purchases count as money out when the PO is placed.
  */
+/** Paid invoices not tied to a sales order: the order already counts the money for the others. */
+export function paidStandaloneInvoices(db: BizPilotDB): Invoice[] {
+  return db.invoices.filter((i) => i.status === 'paid' && !i.orderId && i.type !== 'credit_note');
+}
+
 export function cashPosition(db: BizPilotDB): CashPosition {
-  const salesIn = paidOrders(db.salesOrders).reduce((s, o) => s + o.total, 0);
+  const salesIn = paidOrders(db.salesOrders).reduce((s, o) => s + o.total, 0) + paidStandaloneInvoices(db).reduce((s, i) => s + i.total, 0);
   const expensesOut = db.expenses.filter((e) => e.paid).reduce((s, e) => s + e.amount, 0);
   const purchasesOut = db.purchaseOrders
     .filter((p) => ['ordered', 'partially_received', 'received'].includes(p.status))
@@ -265,6 +272,7 @@ export function cashLedger(db: BizPilotDB): CashEntry[] {
   const capital = Number(db.settings.openingCash) || 0;
   if (capital) out.push({ date: db.settings.openingCashDate || '', label: 'Starting capital (modal)', amount: capital, kind: 'capital' });
   for (const o of paidOrders(db.salesOrders)) out.push({ date: o.date, label: `Sale ${o.orderNumber}${o.customerName ? ` · ${o.customerName}` : ''}`, amount: o.total, kind: 'sale' });
+  for (const i of paidStandaloneInvoices(db)) out.push({ date: i.paidDate || i.issuedDate, label: `Invoice ${i.invoiceNumber} paid · ${i.customerName}`, amount: i.total, kind: 'sale' });
   for (const e of db.expenses.filter((x) => x.paid)) out.push({ date: e.date, label: `Expense · ${e.category}: ${e.description}`, amount: -e.amount, kind: 'expense' });
   for (const p of db.purchaseOrders.filter((x) => ['ordered', 'partially_received', 'received'].includes(x.status))) {
     const sup = db.suppliers.find((x) => x.id === p.supplierId)?.name;
@@ -492,4 +500,65 @@ export function returnStats(db: BizPilotDB, days = 90) {
     reasons: [...byReason.entries()].sort((a, b) => b[1] - a[1]),
     products,
   };
+}
+
+// ---------------------------------------------------------------- ageing (blueprint D3: accounts receivable and payable)
+
+export const AGEING_BUCKETS = ['Not due yet', '1–30 days', '31–60 days', '61–90 days', 'Over 90 days'] as const;
+
+function bucketOf(daysLate: number): number {
+  return daysLate <= 0 ? 0 : daysLate <= 30 ? 1 : daysLate <= 60 ? 2 : daysLate <= 90 ? 3 : 4;
+}
+
+export interface AgeingRow<T> {
+  name: string;
+  amounts: number[]; // one per AGEING_BUCKETS entry
+  total: number;
+  oldestDaysLate: number;
+  items: T[];
+}
+
+export interface Ageing<T> {
+  totals: number[];
+  total: number;
+  overdue: number;
+  rows: AgeingRow<T>[];
+}
+
+function age<T>(items: T[], name: (x: T) => string, due: (x: T) => string, amount: (x: T) => number, asOf: number): Ageing<T> {
+  const totals = AGEING_BUCKETS.map(() => 0);
+  const rows = new Map<string, AgeingRow<T>>();
+  for (const x of items) {
+    const late = Math.floor((asOf - new Date(due(x)).getTime()) / DAY);
+    const b = bucketOf(late);
+    const a = amount(x);
+    totals[b] += a;
+    const key = name(x).trim() || 'Unknown';
+    const row = rows.get(key) ?? { name: key, amounts: AGEING_BUCKETS.map(() => 0), total: 0, oldestDaysLate: 0, items: [] };
+    row.amounts[b] += a;
+    row.total += a;
+    row.oldestDaysLate = Math.max(row.oldestDaysLate, late);
+    row.items.push(x);
+    rows.set(key, row);
+  }
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const total = r2(totals.reduce((s, n) => s + n, 0));
+  return {
+    totals: totals.map(r2),
+    total,
+    overdue: r2(total - totals[0]),
+    rows: [...rows.values()].map((r) => ({ ...r, amounts: r.amounts.map(r2), total: r2(r.total) })).sort((a, b) => b.oldestDaysLate - a.oldestDaysLate || b.total - a.total),
+  };
+}
+
+/** Money customers owe on issued, unpaid invoices, by how late it is. */
+export function receivablesAgeing(db: BizPilotDB, asOf = Date.now()): Ageing<Invoice> {
+  const open = db.invoices.filter((i) => (i.status === 'issued' || i.status === 'overdue') && i.type !== 'credit_note');
+  return age(open, (i) => i.customerName, (i) => i.dueDate, (i) => i.total, asOf);
+}
+
+/** Bills the business has not paid yet, by how late they are. Undated bills count from their record date. */
+export function payablesAgeing(db: BizPilotDB, asOf = Date.now()): Ageing<Expense> {
+  const open = db.expenses.filter((e) => !e.paid);
+  return age(open, (e) => e.description || e.category, (e) => e.dueDate || e.date, (e) => e.amount, asOf);
 }

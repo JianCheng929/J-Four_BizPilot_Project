@@ -345,6 +345,43 @@ export interface Invoice {
   paidDate?: string | null;
   orderId: string | null;
   einvoice: EInvoiceState;
+  /** Payment reminders sent (blueprint D5). Only set once a reminder has gone out. */
+  remindersSent?: number;
+  lastReminderAt?: string | null;
+  /** Repeat this invoice (blueprint D5 recurring invoices). Only on the original. */
+  recurrence?: InvoiceRecurrence | null;
+  /** Copies made by a recurring invoice point back to the original. */
+  recurringFrom?: string | null;
+  /** Invoice created from an accepted quotation. */
+  quotationId?: string | null;
+}
+
+export interface InvoiceRecurrence {
+  every: 'week' | 'month' | 'quarter' | 'year';
+  nextDate: string; // YYYY-MM-DD the next copy is due
+  active: boolean;
+}
+
+export interface Quotation {
+  id: string;
+  quoteNumber: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone: string;
+  customerAddress: string;
+  customerTin: string;
+  customerBrn: string;
+  lines: InvoiceLine[];
+  subtotal: number;
+  taxTotal: number;
+  total: number;
+  status: 'draft' | 'sent' | 'accepted' | 'declined' | 'expired' | 'converted';
+  issuedDate: string;
+  validUntil: string; // ISO
+  paymentDays: number; // payment terms carried to the invoice
+  note: string;
+  invoiceId: string | null;
+  createdBy: string;
 }
 
 export type Sentiment = 'positive' | 'neutral' | 'negative';
@@ -431,7 +468,9 @@ export type ApprovalType =
   | 'customer_message'
   | 'refund'
   | 'stock_count'
-  | 'production_order';
+  | 'production_order'
+  | 'payment_reminder'
+  | 'quotation_send';
 
 export interface ApprovalRequest {
   id: string;
@@ -534,6 +573,7 @@ export interface BizPilotDB {
   transfers: StockTransfer[];
   stockCounts: StockCount[];
   productionOrders: ProductionOrder[];
+  quotations: Quotation[];
   approvals: ApprovalRequest[];
   auditLog: AuditLogEntry[];
   notifications: AppNotification[];

@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { isSupabaseConfigured, supabaseAdmin } from './lib/supabase.ts';
 import { publishDueContent } from './lib/execute.ts';
+import { startBilling } from './lib/billing.ts';
 import { checkEngine, restoreLogin, saveLogin } from './agent/workbuddy.ts';
 import { integrations } from './routes/integrations.ts';
 import { approvals } from './routes/approvals.ts';
@@ -76,4 +77,5 @@ app.listen(PORT, async () => {
   await supabaseAdmin().from('agent_tasks').update({ status: 'failed', result: 'Interrupted because the BizPilot server restarted.' }).in('status', ['starting', 'running', 'waiting_permission']);
   setInterval(() => void publishDueContent().catch((e) => console.error(e)), 60_000);
   startAutopilot();
+  startBilling();
 });

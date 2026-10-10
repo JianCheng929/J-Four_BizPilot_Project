@@ -9,6 +9,9 @@ import { PageHeader } from '@/components/layout/AppShell';
 import { SalesTab } from '@/components/bizpilot/finance/SalesTab';
 import { ExpensesTab } from '@/components/bizpilot/finance/ExpensesTab';
 import { InvoicesTab } from '@/components/bizpilot/finance/InvoicesTab';
+import { QuotationsTab } from '@/components/bizpilot/finance/QuotationsTab';
+import { AgeingTab } from '@/components/bizpilot/finance/AgeingTab';
+import { receivablesAgeing } from '@/lib/metrics';
 import { PnLTab } from '@/components/bizpilot/finance/PnLTab';
 import { CashFlowTab } from '@/components/bizpilot/finance/CashFlowTab';
 import { MarginCheck } from '@/components/bizpilot/MarginCheck';
@@ -27,8 +30,9 @@ export function Finance() {
     if (checked.current) return;
     checked.current = true;
     const wouldChange = db.invoices.some((i) => i.status === 'issued' && new Date(i.dueDate).getTime() < Date.now() - DAY);
-    if (wouldChange) run((d) => ops.refreshOverdue(d));
-  }, [db.invoices, run]);
+    const quotesExpire = (db.quotations ?? []).some((q) => (q.status === 'draft' || q.status === 'sent') && new Date(q.validUntil).getTime() < Date.now() - DAY);
+    if (wouldChange || quotesExpire) run((d) => { ops.refreshOverdue(d); ops.refreshExpiredQuotations(d); });
+  }, [db.invoices, db.quotations, run]);
 
   const week = salesLastNDays(db, 7);
   const bills = upcomingBills(db, 7);
@@ -49,7 +53,9 @@ export function Finance() {
         <TabsList>
           <TabsTrigger value="sales">Sales</TabsTrigger>
           <TabsTrigger value="expenses">Expenses</TabsTrigger>
+          <TabsTrigger value="quotes">Quotations</TabsTrigger>
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
+          <TabsTrigger value="ageing">Who owes what{receivablesAgeing(db).overdue > 0 ? ' •' : ''}</TabsTrigger>
           <TabsTrigger value="pnl">P&amp;L</TabsTrigger>
           <TabsTrigger value="cash">Cash flow</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
@@ -64,6 +70,17 @@ export function Finance() {
         </TabsContent>
         <TabsContent value="expenses" className="mt-4">
           <ExpensesTab />
+        </TabsContent>
+        <TabsContent value="quotes" className="mt-4">
+          <QuotationsTab
+            onOpenInvoice={(id) => {
+              setViewInvoice(id);
+              setTab('invoices');
+            }}
+          />
+        </TabsContent>
+        <TabsContent value="ageing" className="mt-4">
+          <AgeingTab />
         </TabsContent>
         <TabsContent value="invoices" className="mt-4">
           <InvoicesTab viewId={viewInvoice} onView={setViewInvoice} />

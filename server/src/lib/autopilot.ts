@@ -17,7 +17,7 @@ export const AUTOPILOT_PROMPT = `Daily autopilot run. The owner is not watching:
 2. Stock: check reorder suggestions and draft purchase orders for anything running low.
 3. Orders: for paid online orders awaiting fulfilment with an address, get courier quotes and request booking of the best option.
 4. Reviews: draft replies for new reviews in the brand voice; escalate safety, fake-product or refund complaints.
-5. Invoices: follow the einvoice-prep skill for paid orders without an invoice.
+5. Invoices: follow the einvoice-prep skill for paid orders without an invoice. Check get_receivables_payables and send_payment_reminder for overdue invoices that had no reminder in the last 7 days.
 6. Finance: follow the finance-ledger skill for the last 7 days and flag margin, cash or bill problems.
 7. Finish with notify_owner: a short briefing of what you did, what is waiting for approval, and the top 3 things for today.`;
 

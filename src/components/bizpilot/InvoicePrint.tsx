@@ -15,12 +15,24 @@ const PRINT_CSS = `
   .bp-no-print { display: none !important; }
 }`;
 
-export function InvoicePrint({ invoice, onOpenChange }: { invoice: Invoice | null; onOpenChange: (o: boolean) => void }) {
+export function InvoicePrint({
+  invoice,
+  onOpenChange,
+  title: titleOverride,
+  dueLabel = 'Due',
+  footer,
+}: {
+  invoice: Invoice | null;
+  onOpenChange: (o: boolean) => void;
+  title?: string;
+  dueLabel?: string;
+  footer?: string;
+}) {
   const { db } = useBizPilot();
   if (!invoice) return null;
   const s = db.settings;
   const cur = s.currency || 'RM';
-  const title = invoice.type === 'credit_note' ? 'CREDIT NOTE' : invoice.einvoice.uuid ? 'E-INVOICE' : 'INVOICE';
+  const title = titleOverride ?? (invoice.type === 'credit_note' ? 'CREDIT NOTE' : invoice.einvoice.uuid ? 'E-INVOICE' : 'INVOICE');
   const sellerMissing = [!s.legalName && 'legal name', !s.brn && 'BRN', !s.tin && 'TIN', !s.addressLine && 'address'].filter(Boolean);
 
   return (
@@ -63,7 +75,7 @@ export function InvoicePrint({ invoice, onOpenChange }: { invoice: Invoice | nul
                   No: <b>{invoice.invoiceNumber}</b>
                 </div>
                 <div>Date: {fmtDate(invoice.issuedDate)}</div>
-                <div>Due: {fmtDate(invoice.dueDate)}</div>
+                <div>{dueLabel}: {fmtDate(invoice.dueDate)}</div>
                 <div className="mt-1 uppercase text-slate-500">{invoice.status}</div>
               </div>
             </div>
@@ -145,6 +157,7 @@ export function InvoicePrint({ invoice, onOpenChange }: { invoice: Invoice | nul
               {invoice.paidDate && <div className="text-right text-xs text-teal-700">Paid {fmtDate(invoice.paidDate)}</div>}
             </div>
           </div>
+          {footer && <div className="mt-4 whitespace-pre-line text-[11px] text-slate-600">{footer}</div>}
           {(!s.sstNo || s.sstNo === 'NA') && invoice.taxTotal === 0 && (
             <div className="mt-4 text-[11px] text-slate-500">Seller is not registered for SST.</div>
           )}

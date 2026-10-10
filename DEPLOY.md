@@ -66,6 +66,7 @@ Run `supabase/industrial.sql` in the Supabase SQL Editor. Safe to re-run; it kee
 - An append-only audit log, a database guard against negative stock, and a guard against importing the same marketplace order twice.
 - Multi-location stock (Inventory → Locations & transfers) and stock counts (Inventory → Stock counts).
 - Manufacturing (Supply Chain → Production): recipes, production orders, material shortages and production costing.
+- Finance → Quotations, repeating invoices, payment reminders and Finance → Who owes what (receivable and payable ageing). The server makes repeating invoice copies once an hour.
 Re-run the file whenever you get a newer copy.
 
 Until it is run, the app still works but saves row by row without conflict checks, and team roles are off.

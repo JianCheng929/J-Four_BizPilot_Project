@@ -13,6 +13,7 @@
 --   4. Only owners and managers can decide approvals; stock can't go negative.
 --   5. Multi-location stock: shops, warehouses, transfers and stock counts.
 --   6. Manufacturing: recipes (bill of materials) and production orders.
+--   7. Quotations, payment reminders and repeating invoices.
 -- ============================================================
 
 -- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
@@ -97,6 +98,37 @@ create table if not exists production_orders (
   unique (business_id, order_number)
 );
 create index if not exists idx_production_biz on production_orders (business_id, created_at desc);
+
+-- Quotations, payment reminders, repeating invoices (blueprint §8 D5) ----------------
+create table if not exists quotations (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  quote_number text not null,
+  customer_name text not null,
+  customer_email text default '',
+  customer_phone text default '',
+  customer_address text default '',
+  customer_tin text default '',
+  customer_brn text default '',
+  lines jsonb not null default '[]'::jsonb,
+  subtotal numeric(12,2) default 0,
+  tax_total numeric(12,2) default 0,
+  total numeric(12,2) default 0,
+  status text default 'draft' check (status in ('draft','sent','accepted','declined','expired','converted')),
+  issued_date timestamptz default now(),
+  valid_until timestamptz,
+  payment_days int default 30,
+  note text default '',
+  invoice_id text,
+  created_by text default '',
+  unique (business_id, quote_number)
+);
+create index if not exists idx_quotations_biz on quotations (business_id, issued_date desc);
+alter table invoices add column if not exists reminders_sent int default 0;
+alter table invoices add column if not exists last_reminder_at timestamptz;
+alter table invoices add column if not exists recurrence jsonb;
+alter table invoices add column if not exists recurring_from text;
+alter table invoices add column if not exists quotation_id text;
 
 -- 1. Team members ------------------------------------------------------------------
 create table if not exists business_members (
@@ -193,7 +225,7 @@ begin
   foreach t in array array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -224,7 +256,7 @@ begin
   foreach t in array array[
     'businesses','products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations'
   ]
   loop
     execute format('alter table %I add column if not exists row_version int not null default 0', t);
@@ -286,7 +318,7 @@ declare
   allowed constant text[] := array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders'];
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations'];
   c jsonb;
   tbl text;
   op text;

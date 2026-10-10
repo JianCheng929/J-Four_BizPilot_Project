@@ -37,15 +37,48 @@ export function authDir() {
  * are always in the format this machine's runtime can read.
  */
 const LOGIN_KEY = 'workbuddy_login';
-const LOGIN_FILE = /^[\w-][\w.-]*$/; // any plain file name in authDir()
+const LOGIN_FILE = /^[\w-][\w.-]*$/; // a plain file name, no paths
 let lastSaved = '';
+let lastSaveNote = 'Not attempted yet.';
+
+/** For the admin page: what the runtime has on disk (names and sizes only) and the last save result. */
+export function loginDiagnostics() {
+  const base = join(authDir(), '..', '..', '..');
+  const found: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    if (depth > 5 || found.length > 60 || !existsSync(dir)) return;
+    for (const f of readdirSync(dir)) {
+      const p = join(dir, f);
+      const st = statSync(p);
+      if (st.isDirectory()) walk(p, depth + 1);
+      else found.push(`${p.slice(base.length + 1)} (${st.size} B)`);
+    }
+  };
+  try { walk(base, 0); } catch (e) { found.push(`error: ${(e as Error).message}`); }
+  const cb = join(homedir(), '.codebuddy');
+  const before = found.length;
+  try { walk(cb, 3); } catch { /* optional */ }
+  for (let i = before; i < found.length; i++) found[i] = `~/.codebuddy: ${found[i]}`;
+  return { dataDir: base, files: found, lastSave: lastSaveNote };
+}
+
+/**
+ * Folders where the runtime keeps its login state. The npm CLI keeps some of it
+ * in ~/.codebuddy/local_storage rather than the desktop app's auth folder, so
+ * both are copied. Keys look like "auth/<file>" and "local/<file>".
+ */
+function loginRoots(): Record<string, string> {
+  return { auth: authDir(), local: join(homedir(), '.codebuddy', 'local_storage') };
+}
 
 function readLoginFiles(): Record<string, string> {
-  const dir = authDir();
-  if (!existsSync(dir)) return {};
   const files: Record<string, string> = {};
-  for (const f of readdirSync(dir)) {
-    if (LOGIN_FILE.test(f) && statSync(join(dir, f)).isFile()) files[f] = readFileSync(join(dir, f), 'utf8');
+  for (const [root, dir] of Object.entries(loginRoots())) {
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      const p = join(dir, f);
+      if (LOGIN_FILE.test(f) && statSync(p).isFile()) files[`${root}/${f}`] = readFileSync(p).toString('base64');
+    }
   }
   return files;
 }
@@ -63,9 +96,14 @@ export async function restoreLogin() {
     return false;
   }
   const files = JSON.parse(String(data.value)) as Record<string, string>;
-  const dir = authDir();
-  mkdirSync(dir, { recursive: true });
-  for (const [f, body] of Object.entries(files)) if (LOGIN_FILE.test(f)) writeFileSync(join(dir, f), body, { mode: 0o600 });
+  const roots = loginRoots();
+  for (const [key, body] of Object.entries(files)) {
+    const [root, f] = key.split('/');
+    const dir = roots[root];
+    if (!dir || !f || !LOGIN_FILE.test(f)) continue;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, f), Buffer.from(body, 'base64'), { mode: 0o600 });
+  }
   lastSaved = JSON.stringify(files);
   console.log(`WorkBuddy login restored from Supabase (${Object.keys(files).length} file(s)).`);
   return true;
@@ -73,18 +111,25 @@ export async function restoreLogin() {
 
 /** Copy the login files to Supabase when they change (a new sign-in or a refreshed token). */
 export async function saveLogin(report = false) {
-  if (!isSupabaseConfigured()) return;
+  if (!isSupabaseConfigured()) {
+    lastSaveNote = 'Supabase is not configured on the server.';
+    return;
+  }
   const files = readLoginFiles();
   if (!Object.keys(files).length) {
-    if (report) console.error(`WorkBuddy login not saved: no files in ${authDir()}`);
+    lastSaveNote = `No login files in ${Object.values(loginRoots()).join(' or ')}`;
+    if (report) console.error(`WorkBuddy login not saved: ${lastSaveNote}`);
     return;
   }
   const value = JSON.stringify(files);
   if (value === lastSaved) return;
   const { error } = await supabaseAdmin().from('server_secrets').upsert({ key: LOGIN_KEY, value, updated_at: new Date().toISOString() });
-  if (error) console.error(`Could not save the WorkBuddy login: ${error.message}`);
-  else {
+  if (error) {
+    lastSaveNote = `Supabase error: ${error.message}`;
+    console.error(`Could not save the WorkBuddy login: ${error.message}`);
+  } else {
     lastSaved = value;
+    lastSaveNote = `Saved ${Object.keys(files).length} file(s) at ${new Date().toISOString()}`;
     console.log(`WorkBuddy login saved to Supabase (${Object.keys(files).join(', ')}).`);
   }
 }

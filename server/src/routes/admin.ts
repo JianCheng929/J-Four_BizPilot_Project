@@ -2,7 +2,7 @@ import { Router, type Request } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { unstable_v2_authenticate, unstable_v2_logout } from '@tencent-ai/agent-sdk';
 import { handle, HttpError } from '../lib/http.ts';
-import { checkEngine, cliPath, environment, forgetLogin, readAccount, rememberAccount, runtimeEnv, saveLogin, status } from '../agent/workbuddy.ts';
+import { checkEngine, cliPath, environment, forgetLogin, loginDiagnostics, readAccount, rememberAccount, runtimeEnv, saveLogin, status } from '../agent/workbuddy.ts';
 
 /**
  * Operator-only page for signing the server in to BizPilot's WorkBuddy account.
@@ -30,7 +30,8 @@ admin.get('/workbuddy', (_req, res) => {
 admin.get('/workbuddy/status', handle(async (req) => {
   checkKey(req);
   if (req.query.refresh) await checkEngine(true);
-  return { login, engine: await status() };
+  await saveLogin(true).catch(() => undefined);
+  return { login, engine: await status(), storage: loginDiagnostics() };
 }));
 
 admin.post('/workbuddy/login', handle(async (req) => {
@@ -99,7 +100,7 @@ const $=id=>document.getElementById(id);const out=$('out');let timer;
 const call=async(path,method='GET')=>{const r=await fetch('/admin/workbuddy'+path,{method,headers:{'x-admin-key':$('key').value}});let j;try{j=await r.json()}catch{throw new Error('The server is restarting or busy (HTTP '+r.status+'). Wait until Render shows Live, then try again.')}if(!r.ok)throw new Error(j.error||r.statusText);return j};
 const show=j=>{const e=j.engine;const l=j.login;let t=e?(e.connected?'Engine: ONLINE'+(e.account?' as '+e.account:''):'Engine: offline'+(e.error?' ('+e.error+')':'')):'';
  if(l&&l.state==='waiting'&&l.url){out.innerHTML='';const a=document.createElement('a');a.href=l.url;a.target='_blank';a.rel='noopener';a.textContent='Open this link and sign in to WorkBuddy';out.append(a,document.createTextNode('\\n\\nThis page updates by itself when you finish.\\n'+t));return}
- if(l&&l.state==='failed')t='Sign-in failed: '+l.error+'\\n'+t;if(l&&l.state==='done')t='Signed in.\\n'+t;out.textContent=t};
+ if(l&&l.state==='failed')t='Sign-in failed: '+l.error+'\\n'+t;if(l&&l.state==='done')t='Signed in.\\n'+t;if(j.storage)t+='\\n\\nSaved login: '+j.storage.lastSave+'\\nFiles in '+j.storage.dataDir+':\\n'+(j.storage.files.join('\\n')||'(none)');out.textContent=t};
 const poll=()=>{clearInterval(timer);timer=setInterval(async()=>{try{const j=await call('/status');show(j);if(!j.login||j.login.state!=='waiting')clearInterval(timer)}catch(e){out.textContent=e.message;clearInterval(timer)}},3000)};
 $('check').onclick=async()=>{out.textContent='Checking…';try{show(await call('/status?refresh=1'))}catch(e){out.textContent=e.message}};
 $('login').onclick=async()=>{out.textContent='Starting sign-in…';try{const j=await call('/login','POST');show({login:j.login});poll()}catch(e){out.textContent=e.message}};

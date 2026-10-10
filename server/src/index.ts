@@ -13,6 +13,7 @@ import { email } from './routes/email.ts';
 import { agent } from './routes/agent.ts';
 import { pos, tokens } from './routes/pos.ts';
 import { admin } from './routes/admin.ts';
+import { startAutopilot } from './lib/autopilot.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -51,13 +52,21 @@ app.listen(PORT, async () => {
   console.log(`BizPilot server on http://localhost:${PORT}`);
   // Cloud disks are wiped on restart: put the saved WorkBuddy login back before first use.
   await restoreLogin().catch((e) => console.error(e));
-  checkEngine(true).then((h) =>
+  // Check the sign-in a little later, so a goal sent right after a wake-up gets the CPU first.
+  setTimeout(() => void checkEngine().then((h) =>
     console.log(h.online ? 'WorkBuddy engine: online' : `WorkBuddy engine: OFFLINE — ${h.error}\n  Sign it in at /admin/workbuddy on this server (or "npm run workbuddy:login" locally).`),
-  );
+  ), 3 * 60_000);
+  // Render's free plan sleeps after 15 idle minutes and takes about a minute to wake.
+  // Ping our own public address so the first goal (and the daily autopilot) never waits for that.
+  const self = process.env.KEEP_AWAKE_URL || process.env.RENDER_EXTERNAL_URL;
+  if (self && process.env.KEEP_AWAKE !== 'off') {
+    setInterval(() => void fetch(`${self.replace(/\/$/, '')}/health`).catch(() => undefined), 10 * 60_000);
+  }
   // Keep the stored copy current when the runtime refreshes its token.
   setInterval(() => void saveLogin().catch((e) => console.error(e)), 5 * 60_000);
   if (!isSupabaseConfigured()) return;
   // Tasks interrupted by a restart can't resume.
   await supabaseAdmin().from('agent_tasks').update({ status: 'failed', result: 'Interrupted because the BizPilot server restarted.' }).in('status', ['starting', 'running', 'waiting_permission']);
   setInterval(() => void publishDueContent().catch((e) => console.error(e)), 60_000);
+  startAutopilot();
 });

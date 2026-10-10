@@ -151,8 +151,10 @@ export function runtimeEnv(): Record<string, string> {
   for (const [k, v] of Object.entries(process.env)) env[k] = v !== undefined && keep.test(k) ? v : '';
   // A bare access token has no user id or refresh token (it gave 401) and would override the real login.
   env.CODEBUDDY_AUTH_TOKEN = '';
-  // Each runtime is a large Node process; keep its heap small on a 512 MB server.
-  env.NODE_OPTIONS = process.env.WORKBUDDY_NODE_OPTIONS || '--max-old-space-size=256';
+  // Each runtime is a large Node process. These are the low-memory flags WorkBuddy's own
+  // codebuddy-lowmem launcher uses (about 40% less memory, same speed), plus a heap cap
+  // so it fits next to the server on a 512 MB machine.
+  env.NODE_OPTIONS = process.env.WORKBUDDY_NODE_OPTIONS || '--optimize-for-size --max-semi-space-size=2 --max-old-space-size=320';
   return env;
 }
 
@@ -215,7 +217,9 @@ export function reportRun(ok: boolean, error?: string) {
  * environment and returns no account even when signed in.)
  */
 export async function checkEngine(force = false): Promise<Health> {
-  if (!force && health && Date.now() - health.checkedAt < 10 * 60_000) return health;
+  // Real runs keep `health` current (reportRun), so a check is rarely needed. Each check
+  // starts a whole runtime, which would slow down a goal sent at the same moment.
+  if (!force && health && Date.now() - health.checkedAt < 6 * 60 * 60_000) return health;
   if (checking) return checking;
   // Something is already using the runtime: don't start another just to check.
   if (busy > 0) return health ?? { online: true, checkedAt: Date.now(), error: null };
@@ -249,7 +253,11 @@ export async function checkEngine(force = false): Promise<Health> {
 }
 
 export async function status() {
-  const h = await checkEngine();
+  // Before the first check, answer from the saved login instead of starting a runtime:
+  // opening a page must never compete with the owner's first goal for CPU.
+  const h = health ?? (Object.keys(readLoginFiles()).length
+    ? { online: true, checkedAt: 0, error: null }
+    : await checkEngine());
   const account = readAccount();
   return {
     engine: 'WorkBuddy',

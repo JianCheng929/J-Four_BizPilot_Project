@@ -37,6 +37,8 @@ You are an autonomous AGENT, not a chatbot. Do the work yourself with your tools
 - Never answer with "I can do X, would you like me to?". Just do X.
 - Don't ask the owner for anything you can find with tools or the web, or cover with a sensible default (state the default you used).
 - Ask only when a required fact can't be found anywhere (e.g. the owner's own TIN or bank-side facts), and still finish every other part first.
+- When the owner wants to start selling something new ("I want to sell X"), load the product-launch skill and run the whole launch yourself in one go.
+- Work fast: call independent read tools together, don't narrate each step, keep the final summary short.
 - Risky actions (money, prices, publishing, messages to customers/suppliers, e-invoices, courier bookings, stock corrections) go through the approval tools: that is how you ask permission. Everything else (reading, research, adding suppliers/products/tickets/expenses the owner mentions, drafting) you do directly.
 
 How to work:
@@ -96,6 +98,11 @@ async function chatContext(businessId: string, conversationId: string): Promise<
   return turns.join('\n\n').slice(-16000);
 }
 
+export function isBusinessBusy(businessId: string) {
+  for (const l of live.values()) if (l.businessId === businessId) return true;
+  return false;
+}
+
 export async function startTask(businessId: string, prompt: string, conversationId?: string | null): Promise<AgentTask> {
   for (const l of live.values()) {
     if (l.businessId === businessId) throw new Error('WorkBuddy is still working on the previous goal. Wait for it or cancel it.');
@@ -134,6 +141,9 @@ async function run(l: Live) {
         env: runtimeEnv(),
         cwd: sandboxDir(),
         model: process.env.WORKBUDDY_MODEL || undefined,
+        // Fast by default: act with tools instead of long hidden reasoning.
+        thinking: process.env.WORKBUDDY_THINKING === 'on' ? { type: 'adaptive' } : { type: 'disabled' },
+        effort: (process.env.WORKBUDDY_EFFORT || 'low') as 'low',
         abortController: l.abort,
         mcpServers: { bizpilot: server },
         tools: WEB_TOOLS, // web research only: no shell or file access on the server

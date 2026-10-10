@@ -14,6 +14,8 @@ export interface BusinessSettings {
   lowStockThresholdDays: number; // alert if projected days of stock below this
   approvalLimitAmount: number; // RM above which actions always need approval
   automationLevel: 1 | 2 | 3; // blueprint §12
+  autopilot: boolean; // WorkBuddy runs the daily operations by itself
+  autopilotHour: number; // hour of day (business timezone) for the daily run
   brandVoice: string;
   targetAudience: string;
   prohibitedClaims: string;

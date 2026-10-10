@@ -207,6 +207,16 @@ function ProfileForm() {
               </SelectContent>
             </Select>
           </F>
+          <F label="Daily autopilot" hint="WorkBuddy does the daily operations by itself (sync, restock, reviews, invoices, finance check) and leaves a report in Command Centre. Risky actions still wait for your approval.">
+            <Select value={s.autopilot ? 'on' : 'off'} onValueChange={(v) => set('autopilot', v === 'on')}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="on">On</SelectItem>
+                <SelectItem value="off">Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </F>
+          {num('autopilotHour', 'Autopilot time (hour, 0-23)', 'Malaysia time. Default 8 = 8am.')}
           {num('approvalLimitAmount', 'Approval limit (RM)', 'Above this, actions are medium/high risk and never auto-run.')}
           {num('lowStockThresholdDays', 'Low-stock warning (days of stock)')}
           <F label="Brand voice" className="sm:col-span-2"><Textarea rows={2} value={s.brandVoice} onChange={(e) => set('brandVoice', e.target.value)} placeholder="Friendly, simple English with a little Manglish…" /></F>

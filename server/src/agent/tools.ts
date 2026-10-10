@@ -253,7 +253,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
 
     // ------------------------------------------------------------ write: master data
     tool('create_product', 'Add a new product to the catalogue (stock starts at openingStock).',
-      { name: z.string(), sku: z.string().optional(), category: z.string().optional(), price: z.number().nonnegative(), unitCost: z.number().nonnegative(), reorderLevel: z.number().int().nonnegative().optional(), openingStock: z.number().int().nonnegative().optional(), supplier: z.string().optional().describe('Supplier id or name'), weightKg: z.number().positive().optional(), barcode: z.string().optional() },
+      { name: z.string(), sku: z.string().optional(), category: z.string().optional(), description: z.string().max(6000).optional().describe('Listing copy: title, bullets, specs, keywords'), price: z.number().nonnegative(), unitCost: z.number().nonnegative(), reorderLevel: z.number().int().nonnegative().optional(), openingStock: z.number().int().nonnegative().optional(), supplier: z.string().optional().describe('Supplier id or name'), weightKg: z.number().positive().optional(), barcode: z.string().optional() },
       write(async (a) => withBusiness(businessId, (db) => {
         const supplierId = a.supplier ? ops.findSupplier(db, a.supplier)?.id ?? null : null;
         const p = ops.createProduct(db, { ...a, supplierId }, ACTOR);
@@ -261,8 +261,8 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         return productView(p);
       }))),
 
-    tool('update_product', 'Edit product details (name, category, reorder level, supplier, cost, weight, channel SKUs). Price changes must use request_price_change; stock changes must use record_stock_movement or request_stock_adjustment.',
-      { product: z.string(), name: z.string().optional(), category: z.string().optional(), reorderLevel: z.number().int().nonnegative().optional(), unitCost: z.number().nonnegative().optional(), weightKg: z.number().positive().optional(), supplier: z.string().optional(), channelSkus: z.record(z.string(), z.string()).optional() },
+    tool('update_product', 'Edit product details (name, category, description/listing copy, reorder level, supplier, cost, weight, channel SKUs). Price changes must use request_price_change; stock changes must use record_stock_movement or request_stock_adjustment.',
+      { product: z.string(), name: z.string().optional(), category: z.string().optional(), description: z.string().max(6000).optional().describe('Listing copy: title, bullets, specs, keywords'), reorderLevel: z.number().int().nonnegative().optional(), unitCost: z.number().nonnegative().optional(), weightKg: z.number().positive().optional(), supplier: z.string().optional(), channelSkus: z.record(z.string(), z.string()).optional() },
       write(async ({ product, supplier, ...patch }) => withBusiness(businessId, (db) => {
         const p = ops.requireProduct(db, product);
         const extra = supplier ? { supplierId: ops.findSupplier(db, supplier)?.id ?? null } : {};

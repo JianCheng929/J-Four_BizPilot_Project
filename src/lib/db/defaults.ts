@@ -12,6 +12,8 @@ export const defaultSettings: BusinessSettings = {
   lowStockThresholdDays: 7,
   approvalLimitAmount: 500,
   automationLevel: 2,
+  autopilot: true,
+  autopilotHour: 8,
   brandVoice: '',
   targetAudience: '',
   prohibitedClaims: '',

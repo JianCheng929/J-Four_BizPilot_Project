@@ -39,6 +39,8 @@ interface Live {
   handoff?: boolean;
   /** Steps already done before a restart, for a resumed run. */
   resumeNote?: string;
+  /** Asks the running WorkBuddy query to stop (set once it starts). */
+  interrupt?: () => void;
 }
 const live = new Map<string, Live>();
 
@@ -202,11 +204,31 @@ export async function startTask(businessId: string, prompt: string, conversation
   if (error) throw new Error(error.message);
   const l: Live = { task, attachments, businessId, history, abort: new AbortController(), dirty: false };
   live.set(task.id, l);
-  void withRuntime(() => run(l));
+  enqueue(l);
   return task;
 }
 
+/**
+ * One WorkBuddy at a time on the whole server (each run is a ~250 MB process and Render's
+ * plan has 512 MB): goals from other businesses or people wait in line instead of crashing it.
+ */
+let line: Promise<void> = Promise.resolve();
+function enqueue(l: Live) {
+  if (live.size > 1) {
+    push(l, { kind: 'status', text: 'Waiting for BizPilot to finish another goal first…' });
+    void flush(l);
+  }
+  line = line.then(() => withRuntime(() => run(l))).catch((e) => console.error('agent run', e));
+}
+
 async function run(l: Live) {
+  if (l.abort.signal.aborted) { // stopped while waiting in line
+    if (!l.handoff) { l.task.status = 'cancelled'; l.task.result ??= 'Stopped by owner.'; }
+    l.dirty = true;
+    await flush(l);
+    live.delete(l.task.id);
+    return;
+  }
   let beat = 0;
   const timer = setInterval(() => {
     // Heartbeat: a long web read still shows this run is alive, so no other server takes it over.
@@ -262,7 +284,9 @@ async function run(l: Live) {
       } as any,
     });
 
+    l.interrupt = () => { void q.interrupt?.().catch(() => undefined); };
     for await (const msg of q as AsyncIterable<any>) {
+      if (l.abort.signal.aborted) break; // Stop or shutdown: don't wait for team members to finish
       switch (msg.type) {
         case 'system':
           if (msg.subtype === 'init') {
@@ -361,8 +385,17 @@ export function getLiveTask(taskId: string, businessId: string): AgentTask | nul
 export async function cancelTask(taskId: string, businessId: string): Promise<boolean> {
   const l = live.get(taskId);
   if (l && l.businessId === businessId) {
-    push(l, { kind: 'status', text: 'Cancelling…' });
+    push(l, { kind: 'status', text: 'Stopping…' });
+    l.interrupt?.();
     l.abort.abort();
+    // Team members can take a while to wind down: the owner's Stop counts straight away.
+    setTimeout(() => {
+      if (live.get(taskId) !== l) return;
+      l.task.status = 'cancelled';
+      l.task.result = 'Stopped by owner.';
+      l.dirty = true;
+      void flush(l).finally(() => live.delete(taskId));
+    }, 5_000);
     return true;
   }
   // Not on this server (it was cut off by a restart and is waiting to be picked up): close it so it isn't resumed.
@@ -470,7 +503,7 @@ export async function resumeInterruptedTasks() {
       `Steps already done:\n${doneSoFar(events) || '(none yet)'}`,
     ].filter(Boolean).join('\n');
     live.set(id, l);
-    void withRuntime(() => run(l));
+    enqueue(l);
     return;
   }
 }

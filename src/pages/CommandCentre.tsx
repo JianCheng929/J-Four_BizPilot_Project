@@ -207,7 +207,7 @@ function MediaOutputs({ task }: { task: AgentTask }) {
 }
 
 /** One exchange: the owner's message, WorkBuddy's steps (folded once done) and its answer. */
-function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: () => void; pending: number; onNavigate?: (p: PageKey) => void }) {
+function Turn({ task, onStop, stopping, pending, onNavigate }: { task: AgentTask; onStop: () => void; stopping?: boolean; pending: number; onNavigate?: (p: PageKey) => void }) {
   const running = ACTIVE.includes(task.status);
   const [showSteps, setShowSteps] = useState(false);
   const steps = task.events.filter((e) => e.kind !== 'status' || running);
@@ -236,7 +236,7 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
               {steps.map((e, i) => <EventRow key={`${e.at}-${i}`} e={e} />)}
               <li className="flex items-center gap-2 pb-2 text-xs text-slate-500">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" /> WorkBuddy is working…
-                <Button variant="outline" size="sm" className="ml-2 h-6 px-2 text-xs" onClick={onStop}><Square className="mr-1 h-3 w-3" /> Stop</Button>
+                <Button variant="outline" size="sm" className="ml-2 h-6 px-2 text-xs" disabled={stopping} onClick={onStop}>{stopping ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Stopping…</> : <><Square className="mr-1 h-3 w-3" /> Stop</>}</Button>
               </li>
             </ol>
             <MediaOutputs task={task} />
@@ -403,9 +403,15 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
     }
   };
 
-  const stop = async () => {
-    if (!active) return;
-    try { await post(`/api/agent/tasks/${active.id}/cancel`); } catch (e) { toast.error((e as Error).message); }
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
+  const stop = async (id: string) => {
+    setStoppingId(id);
+    try {
+      await post(`/api/agent/tasks/${id}/cancel`);
+    } catch (e) {
+      setStoppingId(null);
+      toast.error((e as Error).message);
+    }
   };
 
   const removeChat = async (id: string) => {
@@ -495,7 +501,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
                 Ask anything about your business, or pick a suggestion below. You can follow up in the same chat.
               </div>
             ) : (
-              turns.map((t) => <Turn key={t.id} task={t} onStop={() => void stop()} pending={pending} onNavigate={onNavigate} />)
+              turns.map((t) => <Turn key={t.id} task={t} onStop={() => void stop(t.id)} stopping={stoppingId === t.id} pending={pending} onNavigate={onNavigate} />)
             )}
             <div ref={bottom} />
           </CardContent>

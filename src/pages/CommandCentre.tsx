@@ -113,14 +113,14 @@ function TeamStrip({ task }: { task: AgentTask }) {
   );
 }
 
-function EventRow({ e }: { e: AgentEvent }) {
+function EventRow({ e, hideAgent }: { e: AgentEvent; hideAgent?: boolean }) {
   const [open, setOpen] = useState(false);
   const Icon = ICON[e.kind] ?? CircleDot;
   const tone =
     e.kind === 'error' ? 'text-red-600' : e.kind === 'artifact' ? 'text-teal-700' : e.kind === 'plan' ? 'text-indigo-600' : e.kind === 'tool_call' ? 'text-amber-600' : 'text-slate-500';
   const expandable = e.kind === 'tool_result' || e.kind === 'tool_call' || e.kind === 'thought';
   const input = e.kind === 'tool_call' ? (e.data as { input?: unknown } | undefined)?.input : undefined;
-  const agent = agentOf(e);
+  const agent = hideAgent ? undefined : agentOf(e);
 
   return (
     <li className="relative flex gap-3 pb-3">
@@ -180,6 +180,83 @@ function chatsFrom(tasks: AgentTask[]): Chat[] {
   return [...chats.values()].sort((a, b) => b.lastAt.localeCompare(a.lastAt));
 }
 
+interface StepGroup { key: string; agent?: string; events: AgentEvent[] }
+
+/** Consecutive steps by the same agent form one foldable block (the lead's own steps too). */
+function groupSteps(events: AgentEvent[]): StepGroup[] {
+  const groups: StepGroup[] = [];
+  for (const e of events) {
+    const agent = agentOf(e);
+    const last = groups[groups.length - 1];
+    if (last && last.agent === agent) last.events.push(e);
+    else groups.push({ key: `${groups.length}-${agent ?? 'lead'}`, agent, events: [e] });
+  }
+  return groups;
+}
+
+/** One agent's block of steps: a header with who, how many tools and how it went, then the steps. */
+function StepBlock({ g, defaultOpen, live }: { g: StepGroup; defaultOpen: boolean; live: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const tools = g.events.filter((e) => e.kind === 'tool_call').length;
+  const team = [...g.events].reverse().map((e) => (e.data as { team?: string } | undefined)?.team).find(Boolean);
+  const failed = team === 'failed' || g.events.some((e) => e.kind === 'error');
+  const brief = g.events.map((e) => (e.data as { brief?: string } | undefined)?.brief).find(Boolean);
+  return (
+    <li className="pb-2">
+      <button className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-slate-50" onClick={() => setOpen((o) => !o)} title={open ? 'Minimise' : 'Expand'}>
+        {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-400" />}
+        {g.agent ? <AgentChip agent={g.agent} /> : <span className="inline-flex shrink-0 items-center rounded bg-teal-700 px-1.5 py-0.5 text-[10px] font-semibold text-white">Lead agent</span>}
+        <span className="min-w-0 flex-1 truncate text-slate-500">
+          {g.events.length} step{g.events.length > 1 ? 's' : ''}{tools ? ` · ${tools} tool${tools > 1 ? 's' : ''}` : ''}
+          {brief && !open ? ` · ${brief.replace(/\s+/g, ' ').slice(0, 90)}` : ''}
+        </span>
+        {live ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" /> : failed ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-500" /> : <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-teal-600" />}
+      </button>
+      {open && <ol className="ml-2 mt-1 border-l border-slate-100 pl-2">{g.events.map((e, i) => <EventRow key={`${e.at}-${i}`} e={e} hideAgent />)}</ol>}
+    </li>
+  );
+}
+
+/** Every step of a goal, grouped by agent. Minimise or expand the whole list or any agent's block, during and after the run. */
+function StepsPanel({ task, running, stopControl }: { task: AgentTask; running: boolean; stopControl?: React.ReactNode }) {
+  const steps = task.events.filter((e) => e.kind !== 'status' || running || (e.data as { team?: string } | undefined)?.team);
+  const groups = groupSteps(steps);
+  const [panel, setPanel] = useState<boolean | null>(null); // null: open while working, folded when done
+  const [all, setAll] = useState<{ open: boolean; n: number }>({ open: false, n: 0 });
+  const open = panel ?? running;
+  const tools = task.events.filter((e) => e.kind === 'tool_call').length;
+  const agents = new Set(groups.map((g) => g.agent ?? 'lead')).size;
+  if (!steps.length && !running) return null;
+  const memberRunning = (g: StepGroup) => running && (g === groups[groups.length - 1] || (g.agent !== undefined && (g.events[g.events.length - 1].data as { team?: string } | undefined)?.team === 'started'));
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50/40">
+      <div className="flex flex-wrap items-center gap-2 px-2 py-1.5 text-xs text-slate-500">
+        <button className="flex items-center gap-1 hover:text-slate-800" onClick={() => setPanel(!open)} title={open ? 'Minimise the steps' : 'Show the steps'}>
+          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          <span className="font-medium text-slate-600">{running ? 'WorkBuddy is working' : 'How WorkBuddy did it'}</span>
+          <span>· {steps.length} steps · {tools} tool{tools === 1 ? '' : 's'} · {agents} agent{agents === 1 ? '' : 's'}</span>
+        </button>
+        {!running && <StatusBadge s={task.status} />}
+        {open && groups.length > 1 && (
+          <span className="flex items-center gap-2">
+            <button className="text-teal-700 hover:underline" onClick={() => setAll((a) => ({ open: true, n: a.n + 1 }))}>Expand all</button>
+            <button className="text-teal-700 hover:underline" onClick={() => setAll((a) => ({ open: false, n: a.n + 1 }))}>Minimise all</button>
+          </span>
+        )}
+        {stopControl && <span className="ml-auto">{stopControl}</span>}
+      </div>
+      {open && (
+        <ol className="px-1 pb-1">
+          {groups.map((g) => (
+            <StepBlock key={`${g.key}-${all.n}`} g={g} live={memberRunning(g)} defaultOpen={all.n ? all.open : memberRunning(g) || groups.length === 1} />
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 /** Images and videos WorkBuddy made in this turn. */
 function MediaOutputs({ task }: { task: AgentTask }) {
   const media = task.events
@@ -209,9 +286,6 @@ function MediaOutputs({ task }: { task: AgentTask }) {
 /** One exchange: the owner's message, WorkBuddy's steps (folded once done) and its answer. */
 function Turn({ task, onStop, stopping, pending, onNavigate }: { task: AgentTask; onStop: () => void; stopping?: boolean; pending: number; onNavigate?: (p: PageKey) => void }) {
   const running = ACTIVE.includes(task.status);
-  const [showSteps, setShowSteps] = useState(false);
-  const steps = task.events.filter((e) => e.kind !== 'status' || running);
-  const toolCalls = task.events.filter((e) => e.kind === 'tool_call').length;
   const created = task.events.filter((e) => e.kind === 'artifact').length;
   const lastMessage = [...task.events].reverse().find((e) => e.kind === 'message')?.text;
   const answer = task.result && task.result !== 'Done.' ? task.result : lastMessage ?? task.result;
@@ -230,27 +304,15 @@ function Turn({ task, onStop, stopping, pending, onNavigate }: { task: AgentTask
         <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-700"><Bot className="h-4 w-4" /></div>
         <div className="min-w-0 flex-1 space-y-2">
           <TeamStrip task={task} />
+          <StepsPanel
+            task={task}
+            running={running}
+            stopControl={running ? <Button variant="outline" size="sm" className="h-6 px-2 text-xs" disabled={stopping} onClick={onStop}>{stopping ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Stopping…</> : <><Square className="mr-1 h-3 w-3" /> Stop</>}</Button> : undefined}
+          />
           {running ? (
-            <>
-            <ol className="border-l border-slate-100 pl-1">
-              {steps.map((e, i) => <EventRow key={`${e.at}-${i}`} e={e} />)}
-              <li className="flex items-center gap-2 pb-2 text-xs text-slate-500">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> WorkBuddy is working…
-                <Button variant="outline" size="sm" className="ml-2 h-6 px-2 text-xs" disabled={stopping} onClick={onStop}>{stopping ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Stopping…</> : <><Square className="mr-1 h-3 w-3" /> Stop</>}</Button>
-              </li>
-            </ol>
             <MediaOutputs task={task} />
-            </>
           ) : (
             <>
-              {(toolCalls > 0 || steps.length > 2) && (
-                <button className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700" onClick={() => setShowSteps((v) => !v)}>
-                  {showSteps ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                  {toolCalls > 0 ? `Used ${toolCalls} tool${toolCalls > 1 ? 's' : ''}` : 'Show steps'}
-                  <StatusBadge s={task.status} />
-                </button>
-              )}
-              {showSteps && <ol className="border-l border-slate-100 pl-1">{steps.map((e, i) => <EventRow key={`${e.at}-${i}`} e={e} />)}</ol>}
               {answer && (
                 <div className={cn('rounded-2xl rounded-tl-sm border px-4 py-3 text-sm', task.status === 'completed' ? 'border-slate-200 bg-white' : 'border-red-200 bg-red-50')}>
                   <Markdown text={answer} className="text-slate-800" />

@@ -1,3 +1,4 @@
+import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useMemo, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
@@ -189,6 +190,7 @@ export function Inventory() {
           </>
         }
       />
+      <AgentPanel page="inventory" className="mb-4" />
 
       {importErrors.length > 0 && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">

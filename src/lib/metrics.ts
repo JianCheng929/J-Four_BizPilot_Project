@@ -248,8 +248,13 @@ export function paidStandaloneInvoices(db: BizPilotDB): Invoice[] {
   return db.invoices.filter((i) => i.status === 'paid' && !i.orderId && i.type !== 'credit_note');
 }
 
+/** Orders whose money has actually arrived (pending payments are expected money in, not cash). */
+export function cashReceivedOrders(orders: SalesOrder[]): SalesOrder[] {
+  return orders.filter((o) => o.status !== 'cancelled' && o.paymentStatus === 'paid');
+}
+
 export function cashPosition(db: BizPilotDB): CashPosition {
-  const salesIn = paidOrders(db.salesOrders).reduce((s, o) => s + o.total, 0) + paidStandaloneInvoices(db).reduce((s, i) => s + i.total, 0);
+  const salesIn = cashReceivedOrders(db.salesOrders).reduce((s, o) => s + o.total, 0) + paidStandaloneInvoices(db).reduce((s, i) => s + i.total, 0);
   const expensesOut = db.expenses.filter((e) => e.paid).reduce((s, e) => s + e.amount, 0);
   const purchasesOut = db.purchaseOrders
     .filter((p) => ['ordered', 'partially_received', 'received'].includes(p.status))
@@ -271,7 +276,7 @@ export function cashLedger(db: BizPilotDB): CashEntry[] {
   const out: CashEntry[] = [];
   const capital = Number(db.settings.openingCash) || 0;
   if (capital) out.push({ date: db.settings.openingCashDate || '', label: 'Starting capital (modal)', amount: capital, kind: 'capital' });
-  for (const o of paidOrders(db.salesOrders)) out.push({ date: o.date, label: `Sale ${o.orderNumber}${o.customerName ? ` · ${o.customerName}` : ''}`, amount: o.total, kind: 'sale' });
+  for (const o of cashReceivedOrders(db.salesOrders)) out.push({ date: o.date, label: `Sale ${o.orderNumber}${o.customerName ? ` · ${o.customerName}` : ''}`, amount: o.total, kind: 'sale' });
   for (const i of paidStandaloneInvoices(db)) out.push({ date: i.paidDate || i.issuedDate, label: `Invoice ${i.invoiceNumber} paid · ${i.customerName}`, amount: i.total, kind: 'sale' });
   for (const e of db.expenses.filter((x) => x.paid)) out.push({ date: e.date, label: `Expense · ${e.category}: ${e.description}`, amount: -e.amount, kind: 'expense' });
   for (const p of db.purchaseOrders.filter((x) => ['ordered', 'partially_received', 'received'].includes(x.status))) {
@@ -432,14 +437,21 @@ export function cashFlowForecast(db: BizPilotDB, days = 30) {
   const horizon = Date.now() + days * DAY;
   const inItems: CashFlowItem[] = [];
   const outItems: CashFlowItem[] = [];
-  // Sales orders already count as money in (cashPosition), so only invoices
-  // without a counted order are expected money in.
+  // Paid orders already count as cash (cashPosition). Expected money in: unpaid
+  // orders (by their invoice due date when invoiced) and unpaid standalone invoices.
+  const invoiced = new Set<string>();
   for (const i of db.invoices) {
     if ((i.status === 'issued' || i.status === 'overdue') && new Date(i.dueDate).getTime() <= horizon) {
       const order = i.orderId ? db.salesOrders.find((o) => o.id === i.orderId) : undefined;
-      if (order && order.status !== 'cancelled' && order.paymentStatus !== 'refunded') continue;
+      if (order && (order.status === 'cancelled' || order.paymentStatus !== 'pending')) continue;
+      if (order) invoiced.add(order.id);
       inItems.push({ label: `${i.invoiceNumber} · ${i.customerName}${i.status === 'overdue' ? ' (overdue)' : ''}`, amount: i.total, date: i.dueDate, kind: 'actual' });
     }
+  }
+  for (const o of db.salesOrders) {
+    if (o.status === 'cancelled' || o.paymentStatus !== 'pending' || invoiced.has(o.id)) continue;
+    if (o.invoiceId && db.invoices.some((i) => i.id === o.invoiceId && (i.status === 'issued' || i.status === 'overdue'))) continue; // due after the horizon
+    inItems.push({ label: `${o.orderNumber}${o.customerName ? ` · ${o.customerName}` : ''} (awaiting payment)`, amount: o.total, date: o.date, kind: 'actual' });
   }
   for (const e of db.expenses) {
     if (!e.paid && (!e.dueDate || new Date(e.dueDate).getTime() <= horizon)) {

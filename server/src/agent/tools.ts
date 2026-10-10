@@ -17,6 +17,8 @@ import { isConfigured, providerContext } from '../lib/integrations.ts';
 import { generateImage } from '../lib/media.ts';
 import { finishKlingVideo, klingConfigured, startKlingVideo } from '../lib/kling.ts';
 import { injectionFlag, untrusted } from './untrusted.ts';
+import { detectSignals } from '../../../src/lib/signals.ts';
+import { deriveCustomers } from '../../../src/components/bizpilot/customers.ts';
 
 /**
  * BizPilot's tools, exposed to the WorkBuddy agent as an in-process MCP server.
@@ -144,6 +146,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         return {
           alerts: m.inventoryAlerts(db).map((a) => ({ product: a.product.name, sku: a.product.sku, kind: a.kind, severity: a.severity, detail: a.detail })),
           valuation: { units: v.units, atCost: r2(v.totalCost), atSellingPrice: r2(v.totalRetail), heldAtCost: r2(v.totalHeld) },
+          expiringBatches: ops.expiringBatches(db, 30).map((x) => ({ product: x.product.name, sku: x.product.sku, batch: x.batch.batch, expiry: x.batch.expiry, qty: x.batch.qty, daysLeft: x.daysLeft })),
         };
       })),
 
@@ -505,11 +508,12 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       })),
 
     tool('receive_purchase_order', 'Record goods received for an ordered PO. Only use when the owner confirms goods physically arrived.',
-      { purchaseOrder: z.string().describe('PO id or number'), quantities: z.record(z.string(), z.number().int().nonnegative()).optional().describe('productId → received qty; omit to receive everything') },
-      write(async ({ purchaseOrder, quantities }) => withBusiness(businessId, (db) => {
+      { purchaseOrder: z.string().describe('PO id or number'), quantities: z.record(z.string(), z.number().int().nonnegative()).optional().describe('productId → received qty; omit to receive everything'), batches: z.array(z.object({ product: z.string(), batch: z.string().optional(), expiry: z.string().optional().describe('YYYY-MM-DD') })).optional().describe('Batch/lot number and expiry per product, for products that track batches') },
+      write(async ({ purchaseOrder, quantities, batches }) => withBusiness(businessId, (db) => {
         const po = db.purchaseOrders.find((p) => p.id === purchaseOrder || p.poNumber === purchaseOrder);
         if (!po) throw new ops.OpError('Purchase order not found.');
-        const r = ops.receivePurchaseOrder(db, po.id, quantities ?? 'all', ACTOR);
+        const b = Object.fromEntries((batches ?? []).map((x) => [ops.requireProduct(db, x.product).id, { batch: x.batch, expiry: x.expiry }]));
+        const r = ops.receivePurchaseOrder(db, po.id, quantities ?? 'all', ACTOR, b);
         return { poNumber: r.poNumber, status: r.status };
       }))),
 
@@ -834,6 +838,150 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
     tool('create_campaign', 'Create a draft ad campaign plan with budget and daily cap.',
       { name: z.string(), objective: z.enum(['awareness', 'traffic', 'leads', 'conversions', 'sales']), platform: z.string(), budget: z.number().nonnegative(), dailyCap: z.number().nonnegative().optional(), startDate: z.string().optional(), endDate: z.string().optional() },
       write(async (a) => withBusiness(businessId, (db) => ({ id: ops.addCampaign(db, a, ACTOR).id })))),
+
+    // ------------------------------------------------------------ everything else the owner can do in the app
+    tool('get_signals', 'What needs attention right now, worked out from the real records: stock that is not selling, missing costs, low cash, late invoices, stock running out, expiring batches, unanswered bad reviews, slow movers. Each has evidence and a suggested action. Use it to decide what to do next.', {},
+      safe(async () => detectSignals(await readSnapshot(businessId)).map(({ key, severity, title, evidence, action, auto }) => ({ key, severity, title, evidence, action, actByYourself: auto })))),
+
+    tool('list_customers', 'Customers from real sales orders: spend, number of orders, repeat or at risk (no order in 60 days), channels.', { query: z.string().optional() },
+      safe(async ({ query }) => {
+        const db = await readSnapshot(businessId);
+        let list = deriveCustomers(db.salesOrders);
+        if (query) { const q = query.toLowerCase(); list = list.filter((c) => `${c.name} ${c.email} ${c.phone}`.toLowerCase().includes(q)); }
+        return list.slice(0, 100).map((c) => ({ name: c.name, email: c.email, phone: c.phone, orders: c.orders, totalSpend: r2(c.totalSpend), lastOrder: c.lastOrder, repeat: c.repeat, atRisk: c.atRisk, channels: c.channels }));
+      })),
+
+    tool('update_business_settings', 'Save business facts you learned (brand voice, audience, prohibited claims, differentiators, visual style, languages, competitors, target margin %, low-stock days, ship-from postcode, MSIC, address, phone, email). Automation level, approval limit and starting capital stay with the owner.',
+      { brandVoice: z.string().optional(), targetAudience: z.string().optional(), prohibitedClaims: z.string().optional(), brandDifferentiators: z.string().optional(), brandStyle: z.string().optional(), brandLanguages: z.string().optional(), brandCompetitors: z.string().optional(), targetMarginPct: z.number().min(0).max(95).optional(), lowStockThresholdDays: z.number().int().positive().optional(), shipFromPostcode: z.string().optional(), msicCode: z.string().optional(), msicDescription: z.string().optional(), addressLine: z.string().optional(), city: z.string().optional(), postcode: z.string().optional(), phone: z.string().optional(), email: z.string().optional() },
+      write(async (patch) => withBusiness(businessId, (db) => ({ updated: ops.updateBusinessSettings(db, patch, ACTOR) })))),
+
+    tool('update_supplier', 'Edit a supplier (contact, email, phone, MOQ, lead time, payment terms, categories, notes).',
+      { supplier: z.string(), name: z.string().optional(), contactPerson: z.string().optional(), email: z.string().optional(), phone: z.string().optional(), categories: z.array(z.string()).optional(), minOrderQty: z.number().int().nonnegative().optional(), leadTimeDays: z.number().int().positive().optional(), paymentTerms: z.string().optional(), notes: z.string().optional() },
+      write(async ({ supplier, ...patch }) => withBusiness(businessId, (db) => {
+        const s = ops.findSupplier(db, supplier);
+        if (!s) throw new ops.OpError(`No supplier matches "${supplier}".`);
+        const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+        const u = ops.updateSupplier(db, s.id, clean, ACTOR);
+        return { id: u.id, name: u.name };
+      }))),
+
+    tool('cancel_purchase_order', 'Cancel a purchase order that has not been received (draft, waiting for approval or ordered). Tell the supplier if it was already sent.',
+      { purchaseOrder: z.string() },
+      write(async ({ purchaseOrder }) => withBusiness(businessId, (db) => {
+        const po = db.purchaseOrders.find((p) => p.id === purchaseOrder || p.poNumber === purchaseOrder);
+        if (!po) throw new ops.OpError('Purchase order not found.');
+        ops.cancelPurchaseOrder(db, po.id, ACTOR);
+        return { poNumber: po.poNumber, status: po.status };
+      }))),
+
+    tool('ship_transfer', 'Send a draft stock transfer (takes the stock out of the source; in transit until received).',
+      { transfer: z.string() },
+      write(async ({ transfer }) => withBusiness(businessId, (db) => { const t = ops.shipTransfer(db, transfer, ACTOR); return { transferNumber: t.transferNumber, status: t.status }; }))),
+
+    tool('cancel_transfer', 'Cancel a draft or in-transit stock transfer (in-transit stock goes back to the source).',
+      { transfer: z.string() },
+      write(async ({ transfer }) => withBusiness(businessId, (db) => { const t = ops.cancelTransfer(db, transfer, ACTOR); return { transferNumber: t.transferNumber, status: t.status }; }))),
+
+    tool('update_location', 'Rename a location, change its type or address, close/reopen it, or make it the default.',
+      { location: z.string(), name: z.string().optional(), type: z.enum(['store', 'warehouse', 'online']).optional(), address: z.string().optional(), active: z.boolean().optional(), makeDefault: z.boolean().optional() },
+      write(async ({ location, makeDefault, ...patch }) => withBusiness(businessId, (db) => {
+        const l = findLocation(db, location)!;
+        const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+        if (Object.keys(clean).length) ops.updateLocation(db, l.id, clean, ACTOR);
+        if (makeDefault) ops.setDefaultLocation(db, l.id, ACTOR);
+        return { id: l.id, name: l.name, default: l.isDefault, active: l.active };
+      }))),
+
+    tool('stock_count', 'Run a stock count. action=start opens a count (optionally for one location or some products) and returns the expected quantities; action=record saves counted quantities the owner or staff reported; action=submit closes it (differences go to Approvals). Never invent counted numbers.',
+      { action: z.enum(['start', 'record', 'submit']), count: z.string().optional().describe('Count number, e.g. CNT-00001 (record/submit)'), location: z.string().optional(), products: z.array(z.string()).optional(), counts: z.array(z.object({ product: z.string(), counted: z.number().int().nonnegative() })).optional(), note: z.string().optional() },
+      write(async ({ action, count, location, products, counts, note }) => {
+        if (action === 'start') {
+          return withBusiness(businessId, (db) => {
+            const c = ops.startStockCount(db, { locationId: findLocation(db, location)?.id ?? null, productIds: products?.map((p) => ops.requireProduct(db, p).id), note }, ACTOR);
+            return { countNumber: c.countNumber, lines: c.lines.map((l) => ({ product: db.products.find((p) => p.id === l.productId)?.name, expected: l.expected })) };
+          });
+        }
+        if (!count) throw new ops.OpError('Give the count number.');
+        if (action === 'record') {
+          return withBusiness(businessId, (db) => {
+            const c = db.stockCounts.find((x) => x.id === count || x.countNumber === count);
+            if (!c) throw new ops.OpError('Stock count not found.');
+            for (const x of counts ?? []) ops.recordCount(db, c.id, ops.requireProduct(db, x.product).id, x.counted);
+            return { countNumber: c.countNumber, counted: c.lines.filter((l) => l.counted !== null).length, of: c.lines.length };
+          });
+        }
+        const out = await withBusiness(businessId, (db) => ops.submitStockCount(db, count, ACTOR));
+        return out.approval ? { countNumber: out.count.countNumber, ...(await afterApproval(out.approval)) } : { countNumber: out.count.countNumber, status: out.count.status, note: 'No differences.' };
+      })),
+
+    tool('set_batch_tracking', 'Track batch/lot numbers and expiry dates for a product (food, cosmetics, supplements). Existing stock becomes one opening batch. Stock then leaves earliest-expiry first.',
+      { product: z.string(), on: z.boolean(), openingBatch: z.string().optional(), openingExpiry: z.string().optional().describe('YYYY-MM-DD') },
+      write(async ({ product, on, openingBatch, openingExpiry }) => withBusiness(businessId, (db) => {
+        const p = ops.setTrackBatches(db, ops.requireProduct(db, product).id, on, ACTOR, { batch: openingBatch, expiry: openingExpiry });
+        return { sku: p.sku, trackBatches: Boolean(p.trackBatches), batches: p.batches ?? [] };
+      }))),
+
+    tool('create_variants', 'Create size/colour/flavour variants of a product (e.g. Size S,M,L × Colour Red,Blue). Each variant gets its own SKU and stock; price and cost default to the parent.',
+      { product: z.string(), options: z.array(z.object({ name: z.string(), values: z.array(z.string()).min(1) })).min(1).max(3) },
+      write(async ({ product, options }) => withBusiness(businessId, (db) => {
+        const list = ops.createVariants(db, ops.requireProduct(db, product).id, options, ACTOR);
+        emit({ kind: 'artifact', text: `${list.length} variants created` });
+        return list.map((v) => ({ id: v.id, sku: v.sku, name: v.name, price: v.price, stock: v.stock }));
+      }))),
+
+    tool('cancel_order', 'Cancel a sales order when the customer cancels or it cannot be fulfilled. Unpaid orders cancel straight away (stock released, unpaid invoice cancelled). Paid orders need a refund, which goes to the owner for approval.',
+      { order: z.string(), reason: z.string() },
+      write(async ({ order, reason }) => {
+        const out = await withBusiness(businessId, (db) => ops.requestOrderCancel(db, order, reason, ACTOR));
+        return out.approval ? { orderNumber: out.order.orderNumber, ...(await afterApproval(out.approval)) } : { orderNumber: out.order.orderNumber, status: 'cancelled' };
+      })),
+
+    tool('record_payment', 'Record money received from a customer, for an order or an invoice. The linked order and invoice are both settled. Only when the owner, a bank/marketplace record or the customer\'s proof confirms the money arrived.',
+      { order: z.string().optional(), invoice: z.string().optional() },
+      write(async ({ order, invoice }) => withBusiness(businessId, (db) => {
+        if (order) { const o = ops.recordOrderPayment(db, order, ACTOR); return { orderNumber: o.orderNumber, paymentStatus: o.paymentStatus }; }
+        if (invoice) { const i = ops.markInvoicePaid(db, invoice, ACTOR); return { invoiceNumber: i.invoiceNumber, status: i.status }; }
+        throw new ops.OpError('Give an order or an invoice.');
+      }))),
+
+    tool('cancel_invoice', 'Cancel an unpaid invoice (wrong details, order cancelled). Validated e-invoices must be cancelled on MyInvois first.',
+      { invoice: z.string() },
+      write(async ({ invoice }) => withBusiness(businessId, (db) => { const i = ops.cancelInvoice(db, invoice, ACTOR); return { invoiceNumber: i.invoiceNumber, status: i.status }; }))),
+
+    tool('pay_bill', 'Mark an unpaid bill in Expenses as paid. Only when the owner says it was paid.',
+      { expenseId: z.string() },
+      write(async ({ expenseId }) => withBusiness(businessId, (db) => { const x = ops.payExpense(db, expenseId, ACTOR); return { description: x.description, amount: x.amount, paid: true }; }))),
+
+    tool('reject_return', 'Refuse a return request (outside the return window, used or not from this shop) with the reason.',
+      { returnId: z.string(), reason: z.string() },
+      write(async ({ returnId, reason }) => withBusiness(businessId, (db) => { const r = ops.rejectReturn(db, returnId, reason, ACTOR); return { returnNumber: r.returnNumber, status: r.status }; }))),
+
+    tool('send_quotation', 'Send a draft quotation to the customer (goes to the owner for approval, then is emailed).',
+      { quotation: z.string() },
+      write(async ({ quotation }) => afterApproval(await withBusiness(businessId, (db) => ops.requestQuotationSend(db, quotation, ACTOR))))),
+
+    tool('update_content', 'Edit a marketing draft (title, text, image, platform, schedule). Edited approved content needs approval again.',
+      { contentId: z.string(), title: z.string().optional(), body: z.string().optional(), imageUrl: z.string().optional(), platform: z.enum(['Facebook', 'Instagram', 'TikTok', 'YouTube', 'LinkedIn']).optional(), scheduledDate: z.string().optional() },
+      write(async ({ contentId, ...patch }) => withBusiness(businessId, (db) => {
+        const c = db.contentItems.find((x) => x.id === contentId);
+        if (!c) throw new ops.OpError('Content not found.');
+        if (c.status === 'published') throw new ops.OpError('Published content cannot be edited.');
+        Object.assign(c, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)));
+        if (c.status === 'failed' || c.status === 'approved' || c.status === 'scheduled') { c.status = 'draft'; c.error = null; }
+        ops.audit(db, ACTOR, 'update', 'content', c.id, `Content updated: ${c.title}`);
+        return { contentId: c.id, status: c.status };
+      }))),
+
+    tool('submit_content', 'Send an existing content draft for publishing approval (compliance-checked first).',
+      { contentId: z.string() },
+      write(async ({ contentId }) => afterApproval(await withBusiness(businessId, (db) => ops.submitContentForPublish(db, contentId, ACTOR, { autoPublish: true })))) ),
+
+    tool('update_campaign', 'Update an ad campaign: pause or end it, record spend and results (clicks, impressions, conversions, revenue), or change its plan. Starting it or raising its budget goes to the owner for approval.',
+      { campaign: z.string().describe('Campaign id or name'), status: z.enum(['active', 'paused', 'ended']).optional(), budget: z.number().nonnegative().optional(), dailyCap: z.number().nonnegative().optional(), spend: z.number().nonnegative().optional(), clicks: z.number().int().nonnegative().optional(), impressions: z.number().int().nonnegative().optional(), conversions: z.number().int().nonnegative().optional(), revenue: z.number().nonnegative().optional(), endDate: z.string().optional() },
+      write(async ({ campaign, ...patch }) => {
+        const out = await withBusiness(businessId, (db) => ops.updateCampaign(db, campaign, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), ACTOR));
+        return out.approval ? { campaign: out.campaign.name, ...(await afterApproval(out.approval)) } : { campaign: out.campaign.name, status: out.campaign.status };
+      })),
 
     tool('notify_owner', 'Send the owner an in-app notification (e.g. a daily briefing or an urgent risk).',
       { title: z.string(), body: z.string(), severity: z.enum(['info', 'warning', 'critical']).default('info') },

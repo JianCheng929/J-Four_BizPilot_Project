@@ -77,14 +77,7 @@ export function InvoicesTab({ viewId, onView }: { viewId: string | null; onView:
 
   const cancelInvoice = (inv: Invoice) => {
     if (!window.confirm(`Cancel ${inv.invoiceNumber}?`)) return;
-    run((d, a) => {
-      const x = d.invoices.find((y) => y.id === inv.id);
-      if (!x) throw new ops.OpError('Invoice not found.');
-      if (x.einvoice.status === 'valid') throw new ops.OpError('Cancel the e-invoice on MyInvois first.');
-      x.status = 'cancelled';
-      for (const o of d.salesOrders) if (o.invoiceId === x.id) o.invoiceId = null;
-      ops.audit(d, a, 'cancel', 'invoice', x.invoiceNumber, `${x.invoiceNumber} cancelled`);
-    }, `${inv.invoiceNumber} cancelled`);
+    run((d, a) => ops.cancelInvoice(d, inv.id, a), `${inv.invoiceNumber} cancelled`);
   };
 
   if (db.invoices.length === 0) {

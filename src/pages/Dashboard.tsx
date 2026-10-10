@@ -1,3 +1,4 @@
+import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useEffect, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import {
@@ -198,6 +199,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (p: PageKey) => void }) 
   return (
     <div>
       <PageHeader title="Dashboard" subtitle={`${db.settings.name || 'Your business'} · one view of your business health`} />
+      <AgentPanel page="dashboard" className="mb-4" />
       {capitalOpen && <CapitalDialog open={capitalOpen} onOpenChange={setCapitalOpen} />}
 
       <div className="mb-5 rounded-xl border border-teal-700/20 bg-gradient-to-br from-teal-700/[0.06] to-transparent p-4">

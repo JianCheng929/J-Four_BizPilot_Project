@@ -1,3 +1,4 @@
+import { openAgentChat, useActiveAgentTask } from '@/components/bizpilot/agentChat';
 import { useState, type ReactNode } from 'react';
 import {
   PanelLeftClose,
@@ -14,6 +15,7 @@ import {
   Bell,
   Compass,
   FileBarChart,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBizPilot } from '@/lib/store';
@@ -63,6 +65,7 @@ export function AppShell({
   const { db, markAllNotificationsRead } = useBizPilot();
   const pendingApprovals = db.approvals.filter((a) => a.status === 'pending').length;
   const unread = db.notifications.filter((n) => !n.read).length;
+  const working = useActiveAgentTask();
   // Collapsed sidebar shows icons only; remembered per browser.
   const [mini, setMini] = useState(() => { try { return localStorage.getItem('bp.sidebar') === 'mini'; } catch { return false; } });
   const toggleMini = () => setMini((m) => { try { localStorage.setItem('bp.sidebar', m ? 'full' : 'mini'); } catch { /* optional */ } return !m; });
@@ -136,6 +139,16 @@ export function AppShell({
             })}
           </div>
           <div className="flex items-center gap-2">
+            {working && (
+              <button
+                onClick={() => openAgentChat(working.conversationId || working.id)}
+                className="flex max-w-[22rem] items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-xs font-medium text-teal-800 hover:bg-teal-100"
+                title="Open what BizPilot is doing"
+              >
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                <span className="truncate">BizPilot is working: {working.prompt.split('\n')[0].replace(/^BizPilot noticed this by itself[^:]*: /, '').slice(0, 70)}</span>
+              </button>
+            )}
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="outline" size="sm" className="relative gap-2">

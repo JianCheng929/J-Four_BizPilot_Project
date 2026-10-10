@@ -1,4 +1,4 @@
-import type { SalesOrder } from '@/lib/db/types';
+import type { SalesOrder } from '../../lib/db/types';
 
 export interface CustomerSummary {
   key: string;

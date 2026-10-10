@@ -1,3 +1,4 @@
+import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Headset, Loader2, MessageSquareReply, Plus, RefreshCw, Star, TriangleAlert, Users } from 'lucide-react';
@@ -238,6 +239,7 @@ export function Customers() {
   return (
     <div>
       <PageHeader title="Customers" subtitle="Reviews, support and repeat customers" />
+      <AgentPanel page="customers" className="mb-4" />
       <Tabs defaultValue="reviews">
         <TabsList>
           <TabsTrigger value="reviews">Reviews{stats.unresolved.length ? ` (${stats.unresolved.length})` : ''}</TabsTrigger>

@@ -16,6 +16,7 @@ import { pos, tokens } from './routes/pos.ts';
 import { admin } from './routes/admin.ts';
 import { media } from './routes/media.ts';
 import { startAutopilot } from './lib/autopilot.ts';
+import { startReactor } from './lib/reactor.ts';
 import { rateLimit } from './lib/ratelimit.ts';
 
 const app = express();
@@ -78,4 +79,5 @@ app.listen(PORT, async () => {
   setInterval(() => void publishDueContent().catch((e) => console.error(e)), 60_000);
   startAutopilot();
   startBilling();
+  startReactor();
 });

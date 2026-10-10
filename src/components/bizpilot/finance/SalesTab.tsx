@@ -199,12 +199,7 @@ export function SalesTab({ onOpenInvoice }: { onOpenInvoice: (invoiceId: string)
                             {o.paymentStatus === 'pending' && o.status !== 'cancelled' && (
                               <DropdownMenuItem
                                 onClick={() =>
-                                  run((d, a) => {
-                                    const x = d.salesOrders.find((y) => y.id === o.id);
-                                    if (!x) throw new ops.OpError('Order not found.');
-                                    x.paymentStatus = 'paid';
-                                    ops.audit(d, a, 'paid', 'sales_order', x.orderNumber, `${x.orderNumber} payment received`);
-                                  }, 'Payment recorded')
+                                  run((d, a) => ops.recordOrderPayment(d, o.id, a), 'Payment recorded')
                                 }
                               >
                                 Mark payment received

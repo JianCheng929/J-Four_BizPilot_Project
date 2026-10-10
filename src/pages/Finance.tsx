@@ -1,3 +1,4 @@
+import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useEffect, useRef, useState } from 'react';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
@@ -49,6 +50,7 @@ export function Finance() {
         }
         actions={<CapitalButton />}
       />
+      <AgentPanel page="finance" className="mb-4" />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="sales">Sales</TabsTrigger>

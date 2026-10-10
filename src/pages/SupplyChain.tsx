@@ -1,3 +1,4 @@
+import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useMemo, useState } from 'react';
 import { AlertTriangle, ClipboardList, Factory, PackageCheck, Pencil, Plus, Send, Trash2, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
@@ -107,6 +108,7 @@ export function SupplyChain() {
           </>
         }
       />
+      <AgentPanel page="supplychain" className="mb-4" />
 
       {late.length > 0 && (
         <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50/60 px-4 py-3 text-sm">

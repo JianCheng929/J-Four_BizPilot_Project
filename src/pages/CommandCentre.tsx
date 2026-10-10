@@ -236,9 +236,22 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
     void loadChats();
   }, [loadChats]);
 
+  const asked = useRef(false);
+  // A chat opened from another page ("BizPilot noticed", the working indicator)
+  useEffect(() => {
+    const take = () => {
+      let id: string | null = null;
+      try { id = sessionStorage.getItem('bp.openChat'); sessionStorage.removeItem('bp.openChat'); } catch { /* optional */ }
+      if (id) { asked.current = true; void openChat(id); }
+    };
+    take();
+    window.addEventListener('bizpilot:open-chat', take);
+    return () => window.removeEventListener('bizpilot:open-chat', take);
+  }, [openChat]);
+
   // After a page refresh, reopen the chat that is still running
   useEffect(() => {
-    if (chatId) return;
+    if (chatId || asked.current) return;
     const running = db.agentTasks.find((t) => ACTIVE.includes(t.status));
     if (running) void openChat(running.conversationId || running.id);
   }, [db.agentTasks, chatId, openChat]);

@@ -1,3 +1,4 @@
+import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { AlertTriangle, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Clapperboard, ImagePlus, Megaphone, Pencil, Plus, RotateCcw, Send, Sparkles, Trash2, UserRound } from 'lucide-react';
@@ -128,30 +129,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
 
   const submit = (c: ContentItem) => {
     if (hasPendingApproval(db, 'marketing_publish', 'contentId', c.id)) return;
-    const issues = checkCompliance(`${c.title}\n${c.body}`, db);
-    const blocks = issues.filter((i) => i.level === 'block');
-    if (blocks.length) {
-      toast.error(`Fix before submitting: ${blocks.map((i) => `${i.rule} ("${i.match}")`).join(', ')}`);
-      return;
-    }
-    const flagged = issues.map((i) => `${i.rule}: "${i.match}"`);
-    run((d, a) => {
-      const x = d.contentItems.find((y) => y.id === c.id);
-      if (!x) throw new ops.OpError('Content not found.');
-      x.status = 'in_review';
-      x.error = null;
-      ops.requestApproval(
-        d,
-        {
-          type: 'marketing_publish',
-          title: `Publish to ${x.platform}: ${x.title}`,
-          description: `${x.type.replace('_', ' ')} scheduled ${fmtDateTime(x.scheduledDate)}${AUTO_PUBLISH.has(x.platform) ? ' (auto-publish)' : ' (post manually)'}.\n\n${x.body.slice(0, 400)}${x.body.length > 400 ? '…' : ''}${x.imageUrl ? `\n\nImage: ${x.imageUrl}` : ''}${flagged.length ? `\n\n⚠ Compliance warnings: ${flagged.join('; ')}` : ''}`,
-          payload: { contentId: x.id },
-          risk: flagged.length ? 'medium' : 'low',
-        },
-        a,
-      );
-    }, c.status === 'failed' ? 'Retry sent to Approvals' : 'Sent to Approvals');
+    run((d, a) => ops.submitContentForPublish(d, c.id, a, { autoPublish: AUTO_PUBLISH.has(c.platform) }), c.status === 'failed' ? 'Retry sent to Approvals' : 'Sent to Approvals');
   };
 
   const removeContent = (c: ContentItem) => {
@@ -200,6 +178,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
           </>
         }
       />
+      <AgentPanel page="marketing" className="mb-4" />
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Kpi icon={CalendarDays} label="Scheduled this week" value={String(db.contentItems.filter((c) => { const t = new Date(c.scheduledDate).getTime(); const w = startOfWeek(new Date()).getTime(); return t >= w && t < w + 7 * 86400000; }).length)} />

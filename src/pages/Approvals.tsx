@@ -26,6 +26,7 @@ const TYPE_LABEL: Record<ApprovalType, string> = {
   production_order: 'Production',
   payment_reminder: 'Payment reminder',
   quotation_send: 'Quotation',
+  campaign_launch: 'Ad campaign spend',
 };
 
 /** Live preview of the record an approval will change. */
@@ -79,7 +80,15 @@ function Preview({ a, db }: { a: ApprovalRequest; db: BizPilotDB }) {
     }
     case 'refund': {
       const r = db.returns.find((x) => x.id === p.returnId);
-      if (!r) return null;
+      if (!r) {
+        const o = db.salesOrders.find((x) => x.id === p.orderId);
+        if (!o) return null;
+        return (
+          <div className="rounded-md bg-slate-50 p-2 text-xs">
+            {o.orderNumber} · {o.customerName || 'customer'} · {o.lines.map((l) => `${l.quantity}× ${l.name ?? db.products.find((x) => x.id === l.productId)?.name ?? "item"}`).join(', ')} · refund <b>{money(Number(p.amount))}</b>
+          </div>
+        );
+      }
       const prod = db.products.find((x) => x.id === r.productId);
       return (
         <div className="rounded-md bg-slate-50 p-2 text-xs">

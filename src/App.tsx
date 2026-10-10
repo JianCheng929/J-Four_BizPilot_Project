@@ -23,6 +23,12 @@ import { Login } from '@/pages/Login';
 function Shell() {
   const [page, setPage] = useState<PageKey>(() => (new URLSearchParams(window.location.search).get('page') as PageKey) || 'dashboard');
   useBizPilot();
+  // "BizPilot noticed" panels and the working indicator open a chat in Command Centre.
+  useEffect(() => {
+    const go = () => setPage('command');
+    window.addEventListener('bizpilot:open-chat', go);
+    return () => window.removeEventListener('bizpilot:open-chat', go);
+  }, []);
   return (
     <AppShell page={page} onNavigate={setPage}>
       {page === 'dashboard' && <Dashboard onNavigate={setPage} />}

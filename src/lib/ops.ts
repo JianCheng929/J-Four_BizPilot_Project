@@ -21,12 +21,14 @@ import type {
   SalesOrder,
   SalesOrderLine,
   Sentiment,
+  StockBatch,
   StockMovement,
   Supplier,
   SupportTicket,
 } from './db/types';
 import { newId } from './db/defaults';
 import { cashPosition } from './metrics';
+import { checkCompliance } from './compliance';
 
 /**
  * Deterministic business operations (blueprint §15: the database and business
@@ -115,6 +117,9 @@ export interface ProductInput {
   expiryDate?: string;
   status?: Product['status'];
   openingStock?: number;
+  /** Track stock in batches with their own expiry (opening stock becomes the first batch). */
+  trackBatches?: boolean;
+  openingBatch?: string;
   channelSkus?: Record<string, string>;
 }
 
@@ -148,10 +153,14 @@ export function createProduct(db: BizPilotDB, input: ProductInput, actor: string
     status: input.status ?? 'active',
     channelSkus: input.channelSkus ?? {},
   };
+  if (input.trackBatches) {
+    product.trackBatches = true;
+    product.batches = [];
+  }
   db.products.push(product);
   audit(db, actor, 'create', 'product', product.sku, `Product added: ${product.name}`);
   if (input.openingStock && input.openingStock > 0) {
-    recordStockMovement(db, product.id, 'in', input.openingStock, 'Opening stock', 'OPENING', actor);
+    recordStockMovement(db, product.id, 'in', input.openingStock, 'Opening stock', 'OPENING', actor, { batch: input.openingBatch || 'OPENING', expiry: input.expiryDate || undefined });
   }
   return product;
 }
@@ -160,7 +169,7 @@ export function updateProduct(db: BizPilotDB, id: string, patch: Partial<Product
   const p = db.products.find((x) => x.id === id);
   if (!p) throw new OpError('Product not found.');
   // Stock levels only change through stock movements, never by direct edit.
-  const { stock: _s, reserved: _r, incoming: _i, unavailable: _u, id: _id, ...safe } = patch;
+  const { stock: _s, reserved: _r, incoming: _i, unavailable: _u, id: _id, batches: _b, trackBatches: _t, ...safe } = patch;
   Object.assign(p, safe);
   if (!(p.orderMultiple >= 1)) p.orderMultiple = 1;
   audit(db, actor, 'update', 'product', p.sku, `Product updated: ${Object.keys(safe).join(', ')}`);
@@ -179,7 +188,7 @@ export function recordStockMovement(
   reason: string,
   reference: string,
   actor: string,
-  opts: { locationId?: string | null; strict?: boolean } = {},
+  opts: { locationId?: string | null; strict?: boolean; batch?: string; expiry?: string } = {},
 ): StockMovement {
   const p = db.products.find((x) => x.id === productId);
   if (!p) throw new OpError('Product not found for stock movement.');
@@ -191,6 +200,7 @@ export function recordStockMovement(
   }
   const before = p.stock;
   const locationId = applyLocationDelta(db, p, delta, opts);
+  const batchNote = p.trackBatches ? applyBatchDelta(p, delta, opts) : null;
   p.stock += delta;
   // Writing off damaged or expired goods removes them from held stock first.
   if (type === 'out' && (p.unavailable || 0) > 0 && /damag|expir|quarantin|defect/i.test(reason)) {
@@ -199,11 +209,176 @@ export function recordStockMovement(
   if ((p.unavailable || 0) > p.stock) p.unavailable = p.stock;
   const mv: StockMovement = { id: newId(), productId, type, quantity, reason, reference, date: now(), actor };
   if (locationId) mv.locationId = locationId;
+  if (batchNote) mv.batch = batchNote;
   db.stockMovements.unshift(mv);
   const where = locationId ? ` at ${db.locations.find((l) => l.id === locationId)?.name ?? 'location'}` : '';
   audit(db, actor, 'stock_' + type, 'product', p.sku, `${p.name}: ${before} → ${p.stock}${where} (${reason})`);
   checkLowStock(db, p);
   return mv;
+}
+
+// ---------------------------------------------------------------- batches and expiry (blueprint B1, A5)
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Units on hand that are not in any batch (stock from before tracking was switched on). */
+export function unbatchedQty(p: Product): number {
+  return Math.max(0, p.stock - (p.batches ?? []).reduce((s, b) => s + b.qty, 0));
+}
+
+/** Batches in the order they should leave: earliest expiry first, then oldest received (FEFO). */
+export function batchesFefo(p: Product): StockBatch[] {
+  return [...(p.batches ?? [])].filter((b) => b.qty > 0).sort((a, b) =>
+    (a.expiry || '9999-12-31').localeCompare(b.expiry || '9999-12-31') || a.receivedAt.localeCompare(b.receivedAt));
+}
+
+/**
+ * Apply a stock change to the product's batches. Incoming units go into the
+ * named batch (or a dated lot); outgoing units leave the named batch first,
+ * then by earliest expiry. Returns a note for the movement, e.g. "L1×3, L2×2".
+ */
+function applyBatchDelta(p: Product, delta: number, opts: { batch?: string; expiry?: string }): string | null {
+  const batches = (p.batches ?? []).map((b) => ({ ...b }));
+  const expiry = opts.expiry?.trim() ?? '';
+  if (expiry && !DATE_RE.test(expiry)) throw new OpError('Expiry date must be YYYY-MM-DD.');
+  let note: string;
+  if (delta > 0) {
+    const name = opts.batch?.trim() || `LOT-${now().slice(0, 10).replace(/-/g, '')}`;
+    const same = batches.find((b) => b.batch === name && b.expiry === expiry);
+    if (same) same.qty += delta;
+    else batches.push({ batch: name, expiry, qty: delta, receivedAt: now() });
+    note = `${name}×${delta}`;
+  } else {
+    let need = -delta;
+    const taken: string[] = [];
+    const named = opts.batch?.trim();
+    if (named && !batches.some((b) => b.batch === named && b.qty > 0)) throw new OpError(`No stock in batch ${named} of ${p.name}.`);
+    const order = [...batches.filter((b) => b.batch === named), ...batchesFefo({ ...p, batches }).filter((b) => b.batch !== named)];
+    for (const b of order) {
+      if (need <= 0) break;
+      const real = batches.find((x) => x.batch === b.batch && x.expiry === b.expiry)!;
+      const t = Math.min(real.qty, need);
+      if (t <= 0) continue;
+      real.qty -= t;
+      need -= t;
+      taken.push(`${real.batch}×${t}`);
+    }
+    if (need > 0) taken.push(`no batch×${need}`); // stock from before batches were tracked
+    note = taken.join(', ');
+  }
+  p.batches = batches.filter((b) => b.qty > 0);
+  const dated = p.batches.filter((b) => b.expiry).map((b) => b.expiry).sort();
+  p.expiryDate = dated[0] ?? '';
+  return note;
+}
+
+/** Switch batch tracking on (current stock becomes one opening batch) or off (batches are dropped). */
+export function setTrackBatches(db: BizPilotDB, productId: string, on: boolean, actor: string, opening?: { batch?: string; expiry?: string }): Product {
+  const p = db.products.find((x) => x.id === productId);
+  if (!p) throw new OpError('Product not found.');
+  if (Boolean(p.trackBatches) === on) return p;
+  if (on) {
+    const expiry = opening?.expiry ?? p.expiryDate ?? '';
+    if (expiry && !DATE_RE.test(expiry)) throw new OpError('Expiry date must be YYYY-MM-DD.');
+    p.batches = p.stock > 0 ? [{ batch: opening?.batch?.trim() || 'OPENING', expiry, qty: p.stock, receivedAt: now() }] : [];
+    p.trackBatches = true;
+  } else {
+    p.trackBatches = false;
+    p.batches = [];
+  }
+  audit(db, actor, 'update', 'product', p.sku, `${p.name}: batch tracking ${on ? 'on' : 'off'}`);
+  return p;
+}
+
+export interface ExpiringBatch {
+  product: Product;
+  batch: StockBatch;
+  daysLeft: number;
+}
+
+/** Batches that have expired or expire within `days` days, soonest first. */
+export function expiringBatches(db: BizPilotDB, days = 30): ExpiringBatch[] {
+  const today = Date.parse(`${now().slice(0, 10)}T00:00:00Z`);
+  const out: ExpiringBatch[] = [];
+  for (const p of db.products) {
+    for (const b of p.batches ?? []) {
+      if (!b.expiry || b.qty <= 0) continue;
+      const left = Math.round((Date.parse(`${b.expiry}T00:00:00Z`) - today) / DAY);
+      if (left <= days) out.push({ product: p, batch: b, daysLeft: left });
+    }
+  }
+  return out.sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+// ---------------------------------------------------------------- variants (blueprint B1)
+
+export interface VariantOption {
+  name: string; // e.g. Size
+  values: string[]; // e.g. S, M, L
+}
+
+/** Every combination of option values, e.g. Size × Colour. */
+export function variantCombinations(options: VariantOption[]): Record<string, string>[] {
+  const clean = options.map((o) => ({ name: o.name.trim(), values: [...new Set(o.values.map((v) => v.trim()).filter(Boolean))] })).filter((o) => o.name && o.values.length);
+  let out: Record<string, string>[] = [{}];
+  for (const o of clean) out = out.flatMap((c) => o.values.map((v) => ({ ...c, [o.name]: v })));
+  return clean.length ? out : [];
+}
+
+export const variantLabel = (v: Record<string, string> | null | undefined) => Object.values(v ?? {}).join(' / ');
+
+export function variantsOf(db: BizPilotDB, productId: string): Product[] {
+  return db.products.filter((p) => p.parentId === productId);
+}
+
+/**
+ * Create one product per combination (e.g. T-shirt S/Red, S/Blue, M/Red…),
+ * each with its own SKU, stock, barcode and channel SKUs, copying price,
+ * cost, supplier and reorder settings from the main product. The main
+ * product becomes the family heading; if it has no stock it is set to draft
+ * so it is not sold or reordered by itself.
+ */
+export function createVariants(db: BizPilotDB, productId: string, options: VariantOption[], actor: string, overrides: Record<string, { price?: number; unitCost?: number; openingStock?: number; barcode?: string }> = {}): Product[] {
+  const base = db.products.find((x) => x.id === productId);
+  if (!base) throw new OpError('Product not found.');
+  if (base.parentId) throw new OpError(`${base.name} is itself a variant. Add variants to the main product.`);
+  if (base.bom?.length) throw new OpError(`${base.name} has a recipe. Give each variant its own recipe instead.`);
+  const combos = variantCombinations(options);
+  if (!combos.length) throw new OpError('Add at least one option with values, e.g. Size: S, M, L.');
+  if (combos.length > 100) throw new OpError(`That makes ${combos.length} variants; the limit is 100.`);
+  const existing = new Set(variantsOf(db, base.id).map((v) => variantLabel(v.variantOptions).toLowerCase()));
+  const made: Product[] = [];
+  for (const combo of combos) {
+    const label = variantLabel(combo);
+    if (existing.has(label.toLowerCase())) continue;
+    const o = overrides[label] ?? {};
+    const sku = `${base.sku}-${Object.values(combo).map((v) => v.toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 6) || 'X').join('-')}`;
+    const v = createProduct(db, {
+      name: `${base.name} - ${label}`,
+      sku: db.products.some((p) => p.sku.toLowerCase() === sku.toLowerCase()) ? undefined : sku,
+      category: base.category,
+      description: base.description,
+      barcode: o.barcode ?? '',
+      supplierId: base.supplierId,
+      unitCost: o.unitCost ?? base.unitCost,
+      price: o.price ?? base.price,
+      weightKg: base.weightKg,
+      reorderLevel: base.reorderLevel,
+      safetyStock: base.safetyStock,
+      maxStock: base.maxStock,
+      orderMultiple: base.orderMultiple,
+      status: base.status === 'draft' ? 'active' : base.status,
+      openingStock: o.openingStock,
+      trackBatches: base.trackBatches,
+    }, actor);
+    v.parentId = base.id;
+    v.variantOptions = combo;
+    made.push(v);
+  }
+  if (!made.length) throw new OpError('Those variants already exist.');
+  if (base.stock === 0 && base.reserved === 0 && base.incoming === 0) base.status = 'draft';
+  audit(db, actor, 'create', 'product', base.sku, `${made.length} variant(s) of ${base.name}: ${made.map((v) => variantLabel(v.variantOptions)).join(', ')}`);
+  return made;
 }
 
 // ---------------------------------------------------------------- locations (blueprint §3, A5, B5)
@@ -947,8 +1122,8 @@ export function completeProduction(db: BizPilotDB, id: string, input: CompletePr
   if (good) {
     const before = Math.max(0, p.stock);
     p.unitCost = round2((before * p.unitCost + good * o.actualUnitCost) / (before + good));
-    recordStockMovement(db, p.id, 'in', good, `Made in ${o.orderNumber} (batch ${o.batchNumber})`, o.orderNumber, actor, { locationId: o.locationId || null });
-    if (input.expiryDate && (!p.expiryDate || input.expiryDate < p.expiryDate)) p.expiryDate = input.expiryDate;
+    recordStockMovement(db, p.id, 'in', good, `Made in ${o.orderNumber} (batch ${o.batchNumber})`, o.orderNumber, actor, { locationId: o.locationId || null, batch: o.batchNumber, expiry: input.expiryDate });
+    if (!p.trackBatches && input.expiryDate && (!p.expiryDate || input.expiryDate < p.expiryDate)) p.expiryDate = input.expiryDate;
   }
   o.status = 'completed';
   o.completedAt = now();
@@ -1130,6 +1305,7 @@ export function receivePurchaseOrder(
   poId: string,
   received: Record<string, number> | 'all',
   actor: string,
+  batches: Record<string, { batch?: string; expiry?: string }> = {},
 ): PurchaseOrder {
   const po = db.purchaseOrders.find((p) => p.id === poId);
   if (!po) throw new OpError('Purchase order not found.');
@@ -1147,7 +1323,7 @@ export function receivePurchaseOrder(
         const totalUnits = p.stock + qty;
         p.unitCost = round2(totalUnits > 0 ? (p.unitCost * p.stock + l.unitCost * qty) / totalUnits : l.unitCost);
       }
-      recordStockMovement(db, p.id, 'in', qty, `Received ${po.poNumber}`, po.poNumber, actor, { locationId: po.locationId });
+      recordStockMovement(db, p.id, 'in', qty, `Received ${po.poNumber}`, po.poNumber, actor, { locationId: po.locationId, batch: batches[p.id]?.batch || (p.trackBatches ? po.poNumber : undefined), expiry: batches[p.id]?.expiry });
     }
   }
   const complete = po.lines.every((l) => (l.receivedQty ?? 0) >= l.quantity);
@@ -1175,6 +1351,11 @@ export function cancelPurchaseOrder(db: BizPilotDB, poId: string, actor: string)
     }
   }
   po.status = 'cancelled';
+  for (const a of db.approvals) {
+    if (a.status === 'pending' && a.type === 'purchase_order' && a.payload?.purchaseOrderId === po.id) {
+      a.status = 'rejected'; a.decidedAt = now(); a.decidedBy = actor; a.executionResult = `${po.poNumber} was cancelled`;
+    }
+  }
   audit(db, actor, 'cancel', 'purchase_order', po.poNumber, `${po.poNumber} cancelled`);
 }
 
@@ -1270,7 +1451,7 @@ export function fulfilSalesOrder(db: BizPilotDB, orderId: string, actor: string)
 }
 
 export function cancelSalesOrder(db: BizPilotDB, orderId: string, actor: string, refund = false): SalesOrder {
-  const o = db.salesOrders.find((x) => x.id === orderId);
+  const o = db.salesOrders.find((x) => x.id === orderId || x.orderNumber === orderId);
   if (!o) throw new OpError('Order not found.');
   if (o.status === 'cancelled') return o;
   for (const l of o.lines) {
@@ -1282,9 +1463,98 @@ export function cancelSalesOrder(db: BizPilotDB, orderId: string, actor: string,
   }
   o.status = 'cancelled';
   if (refund) o.paymentStatus = 'refunded';
+  const inv = o.invoiceId ? db.invoices.find((i) => i.id === o.invoiceId) : undefined;
+  if (inv && (inv.status === 'draft' || inv.status === 'issued' || inv.status === 'overdue') && inv.einvoice?.status !== 'valid') {
+    inv.status = 'cancelled';
+    notify(db, `${inv.invoiceNumber} cancelled with ${o.orderNumber}`, refund ? 'Issue a credit note if the customer already received the invoice.' : 'The order was cancelled, so its unpaid invoice was cancelled too.', 'info');
+  } else if (inv && inv.einvoice?.status === 'valid') {
+    notify(db, `${o.orderNumber} cancelled: e-invoice needs action`, `${inv.invoiceNumber} is a validated e-invoice. Cancel it on MyInvois (within 72 hours) or issue a credit note.`, 'warning');
+  }
   audit(db, actor, 'cancel', 'sales_order', o.orderNumber, `${o.orderNumber} cancelled${refund ? ' and refunded' : ''}`);
   recalcAvgDailySales(db);
   return o;
+}
+
+/**
+ * Cancel an order. Without a refund it happens straight away; giving money back
+ * to a paid customer is a refund, which the owner approves first (blueprint §12).
+ */
+export function requestOrderCancel(db: BizPilotDB, orderId: string, reason: string, actor: string): { order: SalesOrder; approval: ApprovalRequest | null } {
+  const o = db.salesOrders.find((x) => x.id === orderId || x.orderNumber === orderId);
+  if (!o) throw new OpError('Order not found.');
+  if (o.status === 'cancelled') throw new OpError(`${o.orderNumber} is already cancelled.`);
+  if (o.paymentStatus !== 'paid') return { order: cancelSalesOrder(db, o.id, actor, false), approval: null };
+  if (db.approvals.some((a) => a.status === 'pending' && a.type === 'refund' && a.payload?.orderId === o.id)) throw new OpError(`A refund for ${o.orderNumber} is already waiting for approval.`);
+  const approval = requestApproval(db, {
+    type: 'refund', title: `Cancel ${o.orderNumber} and refund RM${o.total.toFixed(2)}`,
+    description: `${o.customerName || 'Customer'}: ${reason}. Reserved stock is released (or returned to stock if already shipped).`,
+    payload: { orderId: o.id, amount: o.total }, amount: o.total, risk: o.total > db.settings.approvalLimitAmount ? 'high' : 'medium',
+  }, actor);
+  return { order: o, approval };
+}
+
+/** Submit a content draft for publishing approval (compliance blocks stop it). */
+export function submitContentForPublish(db: BizPilotDB, contentId: string, actor: string, opts: { autoPublish?: boolean } = {}): ApprovalRequest {
+  const x = db.contentItems.find((y) => y.id === contentId);
+  if (!x) throw new OpError('Content not found.');
+  if (x.status === 'published') throw new OpError(`"${x.title}" is already published.`);
+  if (db.approvals.some((a) => a.status === 'pending' && a.type === 'marketing_publish' && a.payload?.contentId === x.id)) throw new OpError(`"${x.title}" is already waiting for approval.`);
+  const issues = checkCompliance(`${x.title}\n${x.body}`, db);
+  const blocks = issues.filter((i) => i.level === 'block');
+  if (blocks.length) throw new OpError(`Fix before submitting: ${blocks.map((i) => `${i.rule} ("${i.match}")`).join(', ')}`);
+  const flagged = issues.map((i) => `${i.rule}: "${i.match}"`);
+  x.status = 'in_review';
+  x.error = null;
+  return requestApproval(db, {
+    type: 'marketing_publish',
+    title: `Publish to ${x.platform}: ${x.title}`,
+    description: `${x.type.replace('_', ' ')} scheduled ${new Date(x.scheduledDate).toLocaleString('en-MY')}${opts.autoPublish ? ' (auto-publish)' : ' (post manually)'}.\n\n${x.body.slice(0, 400)}${x.body.length > 400 ? '…' : ''}${x.imageUrl ? `\n\nImage: ${x.imageUrl}` : ''}${flagged.length ? `\n\n⚠ Compliance warnings: ${flagged.join('; ')}` : ''}`,
+    payload: { contentId: x.id },
+    risk: flagged.length ? 'medium' : 'low',
+  }, actor);
+}
+
+export type CampaignPatch = Partial<Pick<Campaign, 'name' | 'objective' | 'platform' | 'budget' | 'dailyCap' | 'spend' | 'clicks' | 'impressions' | 'conversions' | 'revenue' | 'status' | 'startDate' | 'endDate'>>;
+
+/**
+ * Update a campaign. Starting it, or raising its budget, spends money, so that
+ * goes to Approvals; pausing, ending and recording results happen straight away.
+ */
+export function updateCampaign(db: BizPilotDB, id: string, patch: CampaignPatch, actor: string): { campaign: Campaign; approval: ApprovalRequest | null } {
+  const c = db.campaigns.find((x) => x.id === id || x.name.toLowerCase() === id.toLowerCase());
+  if (!c) throw new OpError('Campaign not found.');
+  const { status, budget, dailyCap, ...rest } = patch;
+  Object.assign(c, rest);
+  const spendUp = (budget !== undefined && budget > c.budget) || (dailyCap !== undefined && dailyCap > c.dailyCap);
+  const launch = status === 'active' && c.status !== 'active';
+  if (budget !== undefined && !spendUp) c.budget = budget;
+  if (dailyCap !== undefined && !spendUp) c.dailyCap = dailyCap;
+  if (status && status !== 'active') c.status = status;
+  let approval: ApprovalRequest | null = null;
+  if (launch || spendUp) {
+    const newBudget = budget ?? c.budget;
+    approval = requestApproval(db, {
+      type: 'campaign_launch',
+      title: launch ? `Start campaign ${c.name} (RM${newBudget.toFixed(2)})` : `Raise ${c.name} budget to RM${newBudget.toFixed(2)}`,
+      description: `${c.platform}, ${c.objective}. Budget RM${newBudget.toFixed(2)}, daily cap RM${(dailyCap ?? c.dailyCap).toFixed(2)}.`,
+      payload: { campaignId: c.id, activate: launch || c.status === 'active', budget: newBudget, dailyCap: dailyCap ?? c.dailyCap },
+      amount: newBudget,
+    }, actor);
+  }
+  audit(db, actor, 'update', 'campaign', c.id, `Campaign updated: ${c.name}${approval ? ' (spend change sent to Approvals)' : ''}`);
+  return { campaign: c, approval };
+}
+
+/** Business settings the agent may change. Automation level, approval limit and capital stay with the owner. */
+export const AGENT_SETTINGS = ['brandVoice', 'targetAudience', 'prohibitedClaims', 'brandDifferentiators', 'brandStyle', 'brandLanguages', 'brandCompetitors', 'targetMarginPct', 'lowStockThresholdDays', 'shipFromPostcode', 'msicCode', 'msicDescription', 'addressLine', 'city', 'postcode', 'phone', 'email'] as const;
+export type AgentSettingsPatch = Partial<Pick<BizPilotDB['settings'], (typeof AGENT_SETTINGS)[number]>>;
+
+export function updateBusinessSettings(db: BizPilotDB, patch: AgentSettingsPatch, actor: string) {
+  const keys = Object.keys(patch).filter((k) => (AGENT_SETTINGS as readonly string[]).includes(k) && (patch as Record<string, unknown>)[k] !== undefined);
+  if (!keys.length) throw new OpError(`Nothing to change. Allowed: ${AGENT_SETTINGS.join(', ')}.`);
+  for (const k of keys) (db.settings as unknown as Record<string, unknown>)[k] = (patch as Record<string, unknown>)[k];
+  audit(db, actor, 'update', 'settings', 'business', `Settings updated: ${keys.join(', ')}`);
+  return keys;
 }
 
 // ---------------------------------------------------------------- invoices
@@ -1384,13 +1654,41 @@ export function issueInvoice(db: BizPilotDB, invoiceId: string, actor: string): 
 }
 
 export function markInvoicePaid(db: BizPilotDB, invoiceId: string, actor: string): Invoice {
-  const inv = db.invoices.find((i) => i.id === invoiceId);
+  const inv = db.invoices.find((i) => i.id === invoiceId || i.invoiceNumber === invoiceId);
   if (!inv) throw new OpError('Invoice not found.');
   if (inv.status === 'cancelled' || inv.status === 'draft') throw new OpError(`${inv.invoiceNumber} is ${inv.status}.`);
   inv.status = 'paid';
   inv.paidDate = now();
+  // The order behind the invoice is paid too (its money is counted once, on the order).
+  const order = inv.orderId ? db.salesOrders.find((o) => o.id === inv.orderId) : undefined;
+  if (order && order.paymentStatus === 'pending') order.paymentStatus = 'paid';
   audit(db, actor, 'paid', 'invoice', inv.invoiceNumber, `${inv.invoiceNumber} marked paid`);
   return inv;
+}
+
+/** Customer paid for an order: the order and its issued invoice are both settled. */
+export function recordOrderPayment(db: BizPilotDB, orderId: string, actor: string): SalesOrder {
+  const o = db.salesOrders.find((x) => x.id === orderId || x.orderNumber === orderId);
+  if (!o) throw new OpError('Order not found.');
+  if (o.status === 'cancelled') throw new OpError(`${o.orderNumber} is cancelled.`);
+  if (o.paymentStatus === 'paid') return o;
+  o.paymentStatus = 'paid';
+  const inv = o.invoiceId ? db.invoices.find((i) => i.id === o.invoiceId) : undefined;
+  if (inv && (inv.status === 'issued' || inv.status === 'overdue')) { inv.status = 'paid'; inv.paidDate = now(); }
+  audit(db, actor, 'paid', 'sales_order', o.orderNumber, `${o.orderNumber} payment received${inv ? ` (${inv.invoiceNumber} settled)` : ''}`);
+  return o;
+}
+
+export function cancelInvoice(db: BizPilotDB, invoiceId: string, actor: string): Invoice {
+  const x = db.invoices.find((i) => i.id === invoiceId || i.invoiceNumber === invoiceId);
+  if (!x) throw new OpError('Invoice not found.');
+  if (x.status === 'paid' || x.status === 'cancelled') throw new OpError(`${x.invoiceNumber} is ${x.status}; issue a credit note instead.`);
+  if (x.einvoice?.status === 'valid') throw new OpError('Cancel the e-invoice on MyInvois first.');
+  x.status = 'cancelled';
+  if (x.recurrence?.active) x.recurrence = { ...x.recurrence, active: false };
+  for (const o of db.salesOrders) if (o.invoiceId === x.id) o.invoiceId = null;
+  audit(db, actor, 'cancel', 'invoice', x.invoiceNumber, `${x.invoiceNumber} cancelled`);
+  return x;
 }
 
 /** Issued invoices past their due date become overdue (blueprint D6). */
@@ -1660,6 +1958,15 @@ export function runRecurringInvoices(db: BizPilotDB, actor: string, today = isoD
   return made;
 }
 
+export function payExpense(db: BizPilotDB, expenseId: string, actor: string): Expense {
+  const x = db.expenses.find((e) => e.id === expenseId);
+  if (!x) throw new OpError('Expense not found.');
+  if (x.paid) throw new OpError(`${x.description} is already paid.`);
+  x.paid = true;
+  audit(db, actor, 'paid', 'expense', x.id, `Bill paid: ${x.description} RM${x.amount.toFixed(2)}`);
+  return x;
+}
+
 // ---------------------------------------------------------------- expenses
 
 export function addExpense(db: BizPilotDB, e: Omit<Expense, 'id'>, actor: string): Expense {
@@ -1902,7 +2209,20 @@ export function applyApprovedAction(db: BizPilotDB, req: ApprovalRequest, actor:
       const q = markQuotationSent(db, String(p.quotationId), actor);
       return external.sentTo ? `${q.quoteNumber} emailed to ${external.sentTo}.` : `${q.quoteNumber} marked as sent. Print it as PDF from Finance → Quotations and share it with the customer.`;
     }
+    case 'campaign_launch': {
+      const c = db.campaigns.find((x) => x.id === p.campaignId);
+      if (!c) throw new OpError('Campaign no longer exists.');
+      c.budget = round2(Number(p.budget ?? c.budget));
+      c.dailyCap = round2(Number(p.dailyCap ?? c.dailyCap));
+      if (p.activate) c.status = 'active';
+      audit(db, actor, 'execute', 'campaign', c.id, `Campaign ${c.name}: ${c.status}, budget RM${c.budget.toFixed(2)}`);
+      return `${c.name} is ${c.status} with a RM${c.budget.toFixed(2)} budget. Start or adjust it in the ad platform; record spend and results here.`;
+    }
     case 'refund': {
+      if (p.orderId) {
+        const o = cancelSalesOrder(db, String(p.orderId), actor, true);
+        return `${o.orderNumber} cancelled and RM${Number(p.amount ?? o.total).toFixed(2)} marked refunded. Pay the customer back through your payment channel.`;
+      }
       const ret = db.returns.find((x) => x.id === p.returnId);
       if (!ret) throw new OpError('Return case no longer exists.');
       if (ret.refundStatus === 'refunded') return `${ret.returnNumber} was already refunded.`;
@@ -2011,7 +2331,7 @@ export function resolveReturn(
 }
 
 export function rejectReturn(db: BizPilotDB, id: string, why: string, actor: string): ReturnCase {
-  const ret = db.returns.find((r) => r.id === id);
+  const ret = db.returns.find((r) => r.id === id || r.returnNumber === id);
   if (!ret) throw new OpError('Return case not found.');
   ret.status = 'rejected';
   ret.resolvedAt = now();

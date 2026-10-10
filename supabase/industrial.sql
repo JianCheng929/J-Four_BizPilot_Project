@@ -14,6 +14,7 @@
 --   5. Multi-location stock: shops, warehouses, transfers and stock counts.
 --   6. Manufacturing: recipes (bill of materials) and production orders.
 --   7. Quotations, payment reminders and repeating invoices.
+--   8. Product variants and batch / expiry tracking.
 -- ============================================================
 
 -- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
@@ -129,6 +130,14 @@ alter table invoices add column if not exists last_reminder_at timestamptz;
 alter table invoices add column if not exists recurrence jsonb;
 alter table invoices add column if not exists recurring_from text;
 alter table invoices add column if not exists quotation_id text;
+
+-- Variants and batches (blueprint §6 B1, §5 A5) ---------------------------------------
+alter table products add column if not exists track_batches boolean default false;
+alter table products add column if not exists batches jsonb default '[]'::jsonb;
+alter table products add column if not exists parent_id text;
+alter table products add column if not exists variant_options jsonb;
+alter table stock_movements add column if not exists batch text;
+create index if not exists idx_products_parent on products (business_id, parent_id);
 
 -- 1. Team members ------------------------------------------------------------------
 create table if not exists business_members (

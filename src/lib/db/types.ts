@@ -89,11 +89,24 @@ export interface Product {
    * on a transfer between locations. The values always add up to `stock`.
    */
   locationStock?: Record<string, number>;
+  /** Batch / lot tracking (blueprint B1, A5): when on, stock is held in batches with their own expiry dates. */
+  trackBatches?: boolean;
+  batches?: StockBatch[];
+  /** Variant of another product (blueprint B1), e.g. size M / colour red of a T-shirt. */
+  parentId?: string | null;
+  variantOptions?: Record<string, string> | null;
   /** Bill of materials (blueprint A2): components used to make one unit. Empty or missing = bought in, not made. */
   bom?: BomLine[];
   /** Labour and overhead per unit made, added to material cost for the production cost. */
   labourCost?: number;
   overheadCost?: number;
+}
+
+export interface StockBatch {
+  batch: string; // lot / batch number
+  expiry: string; // YYYY-MM-DD, '' = no expiry
+  qty: number;
+  receivedAt: string; // ISO
 }
 
 export interface BomLine {
@@ -191,6 +204,7 @@ export interface StockMovement {
   type: 'in' | 'out' | 'adjustment' | 'transfer';
   locationId?: string | null; // where the units came in / went out (from-location for transfers)
   toLocationId?: string | null; // transfers only
+  batch?: string | null; // batch(es) the units came from or went to, e.g. "L001×3, L002×2"
   quantity: number; // signed for adjustments
   reason: string;
   reference: string; // e.g. order/PO number
@@ -470,7 +484,8 @@ export type ApprovalType =
   | 'stock_count'
   | 'production_order'
   | 'payment_reminder'
-  | 'quotation_send';
+  | 'quotation_send'
+  | 'campaign_launch';
 
 export interface ApprovalRequest {
   id: string;

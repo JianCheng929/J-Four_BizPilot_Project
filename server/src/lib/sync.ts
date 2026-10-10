@@ -80,7 +80,9 @@ export async function syncMarketplace(businessId: string, providerId: string, ac
             changed = true;
           }
           if (existing.paymentStatus !== o.paymentStatus && existing.status !== 'cancelled') {
-            existing.paymentStatus = o.paymentStatus;
+            // Paid on the marketplace: the order and its invoice are settled together.
+            if (o.paymentStatus === 'paid') ops.recordOrderPayment(db, existing.id, actor);
+            else existing.paymentStatus = o.paymentStatus;
             changed = true;
           }
           if (changed) updated++;

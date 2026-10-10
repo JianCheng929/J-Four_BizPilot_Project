@@ -28,12 +28,7 @@ export function ExpensesTab() {
   const total30 = cat30.reduce((s, [, v]) => s + v, 0);
 
   const markPaid = (e: Expense) =>
-    run((d, a) => {
-      const x = d.expenses.find((y) => y.id === e.id);
-      if (!x) throw new ops.OpError('Expense not found.');
-      x.paid = true;
-      ops.audit(d, a, 'paid', 'expense', x.id, `Bill paid: ${x.description} ${money(x.amount)}`);
-    }, 'Bill marked paid');
+    run((d, a) => ops.payExpense(d, e.id, a), 'Bill marked paid');
 
   const remove = (e: Expense) => {
     if (!window.confirm(`Delete "${e.description}" (${money(e.amount)})?`)) return;

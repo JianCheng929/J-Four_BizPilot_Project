@@ -38,6 +38,7 @@ export const defaultSettings: BusinessSettings = {
   shipFromPostcode: '',
   defaultTaxRate: 0,
   invoicePrefix: 'INV',
+  targetMarginPct: 30,
 };
 
 export function emptyDB(): BizPilotDB {
@@ -54,6 +55,7 @@ export function emptyDB(): BizPilotDB {
     tickets: [],
     contentItems: [],
     campaigns: [],
+    returns: [],
     approvals: [],
     auditLog: [],
     notifications: [],
@@ -69,7 +71,8 @@ export function newId(): string {
 const RECORD_DEFAULTS: Partial<Record<CollectionKey, Record<string, unknown>>> = {
   products: {
     category: '', description: '', barcode: '', supplierId: null, unitCost: 0, price: 0, weightKg: 0.5,
-    stock: 0, reserved: 0, incoming: 0, reorderLevel: 0, avgDailySales: 0, status: 'active', channelSkus: {},
+    stock: 0, reserved: 0, unavailable: 0, incoming: 0, reorderLevel: 0, safetyStock: 0, maxStock: 0, orderMultiple: 1,
+    expiryDate: '', avgDailySales: 0, status: 'active', channelSkus: {},
   },
   suppliers: {
     contactPerson: '', email: '', phone: '', categories: [], unitCost: 0, minOrderQty: 0, leadTimeDays: 7,
@@ -88,6 +91,10 @@ const RECORD_DEFAULTS: Partial<Record<CollectionKey, Record<string, unknown>>> =
   reviews: { externalId: null, productId: null, customerName: '', text: '', sentiment: 'neutral', topic: 'other' },
   tickets: { customerName: '', customerEmail: '', body: '', notes: '' },
   contentItems: { body: '', imageUrl: '', campaignId: null },
+  returns: {
+    orderId: null, productId: null, customerName: '', notes: '', photoUrl: '', resolution: null, refundAmount: 0,
+    refundStatus: 'none', resolvedAt: null,
+  },
   campaigns: { dailyCap: 0, spend: 0, clicks: 0, impressions: 0, conversions: 0, revenue: 0 },
   agentTasks: { events: [], result: null, workbuddyTaskId: null, workbuddyLink: null },
 };
@@ -97,7 +104,7 @@ const NUMERIC_KEYS = new Set([
   'unitCost', 'price', 'weightKg', 'stock', 'reserved', 'incoming', 'reorderLevel', 'avgDailySales',
   'quantity', 'minOrderQty', 'leadTimeDays', 'reliabilityScore', 'onTimeRate', 'defectRate', 'totalCost',
   'total', 'amount', 'subtotal', 'taxTotal', 'rating', 'budget', 'dailyCap', 'spend', 'clicks',
-  'impressions', 'conversions', 'revenue',
+  'impressions', 'conversions', 'revenue', 'unavailable', 'safetyStock', 'maxStock', 'orderMultiple', 'refundAmount',
 ]);
 
 export function normalizeRecord(collection: CollectionKey, obj: Record<string, unknown>): Record<string, unknown> {

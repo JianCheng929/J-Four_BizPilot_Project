@@ -1,9 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Boxes,
   ClipboardList,
+  Download,
+  HeartPulse,
+  ShieldAlert,
+  Upload,
   History,
   PackagePlus,
   Pencil,
@@ -13,7 +17,8 @@ import {
 } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
-import { availableStock, daysOfStockLeft } from '@/lib/metrics';
+import { availableStock, daysOfStockLeft, inventoryAlerts, stockValuation } from '@/lib/metrics';
+import { importProductsCsv, productsToCsv } from '@/lib/csv';
 import { fmtDateTime, money } from '@/lib/format';
 import type { Product } from '@/lib/db/types';
 import { Badge } from '@/components/ui/badge';
@@ -57,6 +62,31 @@ export function Inventory() {
   const [qtyOverride, setQtyOverride] = useState<Record<string, string>>({});
 
   const suggestions = useMemo(() => ops.reorderSuggestions(db), [db]);
+  const alerts = useMemo(() => inventoryAlerts(db), [db]);
+  const valuation = useMemo(() => stockValuation(db), [db]);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
+
+  const exportCsv = () => {
+    const blob = new Blob([productsToCsv(db)], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `bizpilot-products-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const importCsv = async (file: File | undefined) => {
+    if (!file) return;
+    const text = await file.text();
+    let errs: string[] = [];
+    run((d, a) => {
+      const r = importProductsCsv(d, text, a);
+      errs = r.errors;
+      if (r.errors.length) throw new ops.OpError(`Nothing imported: ${r.errors.length} problem(s) found. See the list below.`);
+      return r;
+    }, 'Catalogue imported');
+    setImportErrors(errs);
+  };
 
   const q = query.trim().toLowerCase();
   const products = db.products.filter(
@@ -127,12 +157,43 @@ export function Inventory() {
             <Button size="sm" variant="outline" onClick={() => openStock('count')} disabled={!db.products.length}>
               <ClipboardList className="mr-1 h-4 w-4" /> Stock count
             </Button>
+            <Button size="sm" variant="outline" onClick={() => openStock('hold')} disabled={!db.products.length}>
+              <ShieldAlert className="mr-1 h-4 w-4" /> Damaged / held
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()} title="Import products from a CSV file">
+              <Upload className="mr-1 h-4 w-4" /> Import CSV
+            </Button>
+            <Button size="sm" variant="outline" onClick={exportCsv} title="Download the catalogue as CSV (also the import template)">
+              <Download className="mr-1 h-4 w-4" /> Export CSV
+            </Button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => {
+                void importCsv(e.target.files?.[0]);
+                e.target.value = '';
+              }}
+            />
             <Button size="sm" className={primaryBtn} onClick={() => setProductDialog({ open: true, product: null })}>
               <Plus className="mr-1 h-4 w-4" /> Add product
             </Button>
           </>
         }
       />
+
+      {importErrors.length > 0 && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
+          <div className="mb-1 flex items-center justify-between">
+            <b>CSV not imported. Fix these rows and try again:</b>
+            <Button size="sm" variant="ghost" onClick={() => setImportErrors([])}>Dismiss</Button>
+          </div>
+          <ul className="list-disc space-y-0.5 pl-5 text-xs text-red-800">
+            {importErrors.slice(0, 30).map((e) => <li key={e}>{e}</li>)}
+          </ul>
+        </div>
+      )}
 
       {suggestions.length > 0 && (
         <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50/60 px-4 py-3 text-sm">
@@ -144,6 +205,9 @@ export function Inventory() {
       <Tabs defaultValue="products">
         <TabsList>
           <TabsTrigger value="products">Products</TabsTrigger>
+          <TabsTrigger value="health">
+            Stock health{alerts.some((a) => a.severity !== 'info') && <Badge className="ml-1.5 h-4 bg-red-500 px-1.5 text-[10px]">{alerts.filter((a) => a.severity !== 'info').length}</Badge>}
+          </TabsTrigger>
           <TabsTrigger value="movements">Movement history</TabsTrigger>
           <TabsTrigger value="reorder">
             Reorder{suggestions.length > 0 && <Badge className="ml-1.5 h-4 bg-amber-500 px-1.5 text-[10px]">{suggestions.length}</Badge>}
@@ -162,7 +226,7 @@ export function Inventory() {
           ) : (
             <SectionCard
               title="Products"
-              description="Available = on hand − reserved for unfulfilled orders. Days left uses the last 28 days of real sales."
+              description="Available = on hand − reserved for orders − held (damaged, expired, quarantined). Days left uses the last 28 days of real sales."
               actions={
                 <div className="relative">
                   <ScanBarcode className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
@@ -218,13 +282,17 @@ export function Inventory() {
                               {p.sku} · {p.category}
                               {p.barcode ? ` · ${p.barcode}` : ''}
                               {supplier ? ` · ${supplier.name}` : ''}
+                              {p.expiryDate ? ` · exp ${p.expiryDate}` : ''}
                             </div>
                           </TableCell>
                           <TableCell className="text-right">
                             {money(p.price)}
                             <div className="text-[11px] text-slate-400">cost {money(p.unitCost)}</div>
                           </TableCell>
-                          <TableCell className="text-right">{p.stock}</TableCell>
+                          <TableCell className="text-right">
+                            {p.stock}
+                            {p.unavailable > 0 && <div className="text-[11px] text-red-600">{p.unavailable} held</div>}
+                          </TableCell>
                           <TableCell className="text-right text-slate-500">{p.reserved}</TableCell>
                           <TableCell className="text-right font-medium">{availableStock(p)}</TableCell>
                           <TableCell className="text-right text-slate-500">{p.incoming}</TableCell>
@@ -264,6 +332,94 @@ export function Inventory() {
               </div>
             </SectionCard>
           )}
+        </TabsContent>
+
+        <TabsContent value="health" className="mt-4 space-y-4">
+          <SectionCard
+            title="Stock alerts"
+            description="Out of stock, running low, expiring within 30 days, expired, slow-moving and held stock. Calculated from your real records."
+          >
+            {alerts.length === 0 ? (
+              <div className="py-6 text-center text-sm text-slate-500">
+                <HeartPulse className="mx-auto mb-2 h-6 w-6 text-teal-600" />
+                No stock problems found.
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Product</TableHead>
+                    <TableHead>Alert</TableHead>
+                    <TableHead>Details</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {alerts.map((a, i) => (
+                    <TableRow key={`${a.product.id}-${a.kind}-${i}`}>
+                      <TableCell className="font-medium">{a.product.name}</TableCell>
+                      <TableCell>
+                        <Pill tone={a.severity === 'critical' ? 'red' : a.severity === 'warning' ? 'amber' : 'slate'}>{a.kind.replace(/_/g, ' ')}</Pill>
+                      </TableCell>
+                      <TableCell className="text-sm text-slate-600">{a.detail}</TableCell>
+                      <TableCell className="text-right">
+                        {a.kind === 'expired' && (
+                          <Button size="sm" variant="outline" onClick={() => openStock('hold', a.product.id)}>Hold stock</Button>
+                        )}
+                        {a.kind === 'held' && (
+                          <Button size="sm" variant="outline" onClick={() => openStock('out', a.product.id)}>Write off</Button>
+                        )}
+                        {(a.kind === 'out_of_stock' || a.kind === 'low_stock') && suggestions.some((s) => s.product.id === a.product.id) && (
+                          <span className="text-xs text-slate-500">See Reorder tab</span>
+                        )}
+                        {(a.kind === 'expiring' || a.kind === 'no_sales' || a.kind === 'slow_moving') && (
+                          <span className="text-xs text-slate-500">Promote or discount it</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </SectionCard>
+
+          <SectionCard
+            title="Stock valuation"
+            description={`${valuation.units} units on hand · ${money(valuation.totalCost)} at cost · ${money(valuation.totalRetail)} at selling price (sellable units)${valuation.totalHeld > 0 ? ` · ${money(valuation.totalHeld)} held as not sellable` : ''}`}
+          >
+            {valuation.rows.length === 0 ? (
+              <div className="py-6 text-center text-sm text-slate-500">No stock on hand.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product</TableHead>
+                      <TableHead className="text-right">On hand</TableHead>
+                      <TableHead className="text-right">Value at cost</TableHead>
+                      <TableHead className="text-right">Value at price</TableHead>
+                      <TableHead className="text-right">Potential profit</TableHead>
+                      <TableHead className="text-right">Held value</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {valuation.rows.map((r) => (
+                      <TableRow key={r.product.id}>
+                        <TableCell className="font-medium">{r.product.name}</TableCell>
+                        <TableCell className="text-right">{r.onHand}</TableCell>
+                        <TableCell className="text-right">{money(r.costValue)}</TableCell>
+                        <TableCell className="text-right">{money(r.retailValue)}</TableCell>
+                        <TableCell className={cn('text-right', r.retailValue - (r.costValue - r.heldValue) < 0 && 'text-red-600')}>
+                          {money(r.retailValue - (r.costValue - r.heldValue))}
+                        </TableCell>
+                        <TableCell className="text-right text-slate-500">{r.heldValue > 0 ? money(r.heldValue) : '—'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </SectionCard>
         </TabsContent>
 
         <TabsContent value="movements" className="mt-4">
@@ -384,6 +540,7 @@ export function Inventory() {
                         <TableHead className="text-right">Available</TableHead>
                         <TableHead className="text-right">Incoming</TableHead>
                         <TableHead className="text-right">Days left</TableHead>
+                        <TableHead>Urgency</TableHead>
                         <TableHead>Why</TableHead>
                         <TableHead className="w-28 text-right">Order qty</TableHead>
                         <TableHead className="text-right">Unit cost</TableHead>
@@ -396,8 +553,16 @@ export function Inventory() {
                           <TableCell className="font-medium">{s.product.name}</TableCell>
                           <TableCell className="text-right">{s.available}</TableCell>
                           <TableCell className="text-right">{s.product.incoming}</TableCell>
-                          <TableCell className="text-right">{s.daysLeft ?? '—'}</TableCell>
-                          <TableCell className="text-xs text-slate-500">{s.reason}</TableCell>
+                          <TableCell className="text-right">
+                            {s.daysLeft ?? '—'}
+                            {s.stockoutDate && <div className="text-[11px] text-slate-400">out ~{s.stockoutDate}</div>}
+                          </TableCell>
+                          <TableCell>
+                            <Pill tone={s.urgency === 'stockout_risk' ? 'red' : s.urgency === 'reorder_now' ? 'amber' : 'slate'}>
+                              {s.urgency === 'stockout_risk' ? 'Stockout risk' : s.urgency === 'reorder_now' ? 'Reorder now' : 'Watch'}
+                            </Pill>
+                          </TableCell>
+                          <TableCell className="max-w-xs text-xs text-slate-500">{s.reason}</TableCell>
                           <TableCell className="text-right">
                             <Input
                               type="number"

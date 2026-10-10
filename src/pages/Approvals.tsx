@@ -21,6 +21,7 @@ const TYPE_LABEL: Record<ApprovalType, string> = {
   shipment_booking: 'Courier booking',
   stock_adjustment: 'Stock adjustment',
   customer_message: 'Customer message',
+  refund: 'Refund',
 };
 
 /** Live preview of the record an approval will change. */
@@ -69,6 +70,16 @@ function Preview({ a, db }: { a: ApprovalRequest; db: BizPilotDB }) {
         <div className="rounded-md bg-slate-50 p-2 text-xs">
           {prod.name}: on hand {prod.stock} → <b>{prod.stock + q}</b> ({q > 0 ? '+' : ''}
           {q})
+        </div>
+      );
+    }
+    case 'refund': {
+      const r = db.returns.find((x) => x.id === p.returnId);
+      if (!r) return null;
+      const prod = db.products.find((x) => x.id === r.productId);
+      return (
+        <div className="rounded-md bg-slate-50 p-2 text-xs">
+          {r.returnNumber} · {r.quantity} × {prod?.name ?? 'item'} · {r.reason.replace(/_/g, ' ')} ({r.condition}) · refund <b>{money(Number(p.amount))}</b>
         </div>
       );
     }

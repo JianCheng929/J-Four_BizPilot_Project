@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Calculator } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
-import { suggestedPrice } from '@/lib/metrics';
+import { priceOptions, suggestedPrice } from '@/lib/metrics';
 import { money } from '@/lib/format';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -21,7 +21,7 @@ export function recommendedPrice(unitCost: number, marginPct: number, platformPc
 export function PricingCalculator() {
   const { db, requestApproval } = useBizPilot();
   const [productId, setProductId] = useState(NONE);
-  const [f, setF] = useState({ unitCost: '', margin: '30', platform: '0', payment: '0', shipping: '0' });
+  const [f, setF] = useState({ unitCost: '', margin: String(db.settings.targetMarginPct || 30), platform: '0', payment: '0', shipping: '0' });
   const product = db.products.find((p) => p.id === productId);
 
   const pickProduct = (id: string) => {
@@ -105,6 +105,25 @@ export function PricingCalculator() {
                 <Row label="Margin on price" value={`${((profit / rounded) * 100).toFixed(1)}%`} />
                 {Number.isFinite(noFee) && <Row label="Price without fees/subsidy" value={money(noFee)} />}
               </div>
+              {cost > 0 && margin > 0 && (
+                <div className="border-t pt-2">
+                  <div className="mb-1 text-xs text-slate-500">Launch price options (before fees)</div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {priceOptions(cost, margin).map((o) => (
+                      <button
+                        key={o.label}
+                        type="button"
+                        className="rounded-md border bg-white p-2 text-left hover:border-teal-400"
+                        title={`Use a ${o.margin}% margin`}
+                        onClick={() => setF({ ...f, margin: String(o.margin) })}
+                      >
+                        <div className="text-[11px] text-slate-500">{o.label} · {o.margin}%</div>
+                        <div className="font-semibold">{money(o.price)}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {product && (
                 <div className="border-t pt-2">
                   <div className="text-xs text-slate-500">

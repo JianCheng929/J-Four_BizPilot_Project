@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { AlertTriangle, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Clapperboard, Megaphone, Pencil, Plus, RotateCcw, Send, Sparkles, Trash2, UserRound } from 'lucide-react';
+import { AlertTriangle, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Clapperboard, ImagePlus, Megaphone, Pencil, Plus, RotateCcw, Send, Sparkles, Trash2, UserRound } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
 import { fmtDate, fmtDateTime, money } from '@/lib/format';
@@ -16,6 +16,8 @@ import { cn } from '@/lib/utils';
 import { EmptyState, Kpi, Pill, SectionCard, StatusPill, primaryBtn } from '@/components/bizpilot/common';
 import { AUTO_PUBLISH, BrandProfileDialog, CampaignDialog, ContentDialog, ContentIdeaDialog } from '@/components/bizpilot/MarketingDialogs';
 import { hasPendingApproval } from '@/components/bizpilot/actions';
+import { isVideoUrl } from '@/components/bizpilot/VideoMaker';
+import { checkCompliance } from '@/lib/compliance';
 
 const CONTENT_FILTERS = ['upcoming', 'all', 'draft', 'in_review', 'scheduled', 'published', 'failed'] as const;
 
@@ -78,9 +80,29 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
       setAsking(false);
     }
   };
+  const [imaging, setImaging] = useState<string | null>(null);
+  /** Generate an AI image for a draft from its text and the brand style. */
+  const makeImage = async (c: ContentItem) => {
+    setImaging(c.id);
+    try {
+      const style = db.settings.brandStyle ? ` Visual style: ${db.settings.brandStyle}.` : '';
+      const prompt = `Professional social media marketing visual for "${c.title}". ${c.body.replace(/#\S+/g, '').slice(0, 500)}${style} Photorealistic product photography, clean composition, no text, no logos.`;
+      const aspect = c.platform === 'TikTok' ? '9:16' : c.platform === 'Instagram' ? '4:5' : c.platform === 'YouTube' ? '16:9' : '1:1';
+      const img = await post<{ url: string }>('/api/media/image', { prompt, aspect });
+      run((d) => {
+        const x = d.contentItems.find((y) => y.id === c.id);
+        if (x) x.imageUrl = img.url;
+      }, 'Image generated and attached');
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setImaging(null);
+    }
+  };
   const nextMonday = addDays(startOfWeek(new Date()), 7).toLocaleDateString('en-CA');
-  const PLAN_WEEK = `Load the marketing-content skill and plan next week's content (Monday ${nextMonday} to Sunday)${calPlatform === 'all' ? ', with a separate schedule for each platform that suits the business' : ` for ${calPlatform} only, using ${calPlatform}'s own best posting times and formats`}. Create the drafts in the content calendar now.`;
-  const VIDEO = 'Load the marketing-content skill and write one short promotional video (script, storyboard, shot list, voice-over, subtitles, title and thumbnail ideas) for the product that most needs a push right now. Save it as a video_script draft.';
+  const PLAN_WEEK = `Load the bizpilot-marketing skill and run next week's marketing cycle (Monday ${nextMonday} to Sunday)${calPlatform === 'all' ? ', with a separate schedule for each platform that suits the business' : ` for ${calPlatform} only, using ${calPlatform}'s own best posting times and formats`}. Create the drafts in the content calendar now.`;
+  const VIDEO = 'Load the marketing-content skill and make one short promotional video for the product that most needs a push right now: write the script (storyboard, voice-over, subtitles, title and thumbnail ideas) as a video_script draft, then call make_video with that draft so a real video is produced.';
+  const makeVideoFor = (c: ContentItem) => `Load the marketing-content skill and make the real video for the draft "${c.title}" (contentId ${c.id}, ${c.platform}). Base the scenes on its script below, then call make_video with that contentId.\n\n${c.body.slice(0, 1500)}`;
   const INSIGHTS = 'Load the marketing-content skill and review our marketing results: what worked, what did not, and the 3 things to change next week. Separate facts from guesses.';
   const [brandOpen, setBrandOpen] = useState(false);
   const [contentDialog, setContentDialog] = useState<{ open: boolean; item: ContentItem | null }>({ open: false, item: null });
@@ -106,10 +128,13 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
 
   const submit = (c: ContentItem) => {
     if (hasPendingApproval(db, 'marketing_publish', 'contentId', c.id)) return;
-    const flagged = s.prohibitedClaims
-      .split(/[,\n]/)
-      .map((w) => w.trim())
-      .filter((w) => w && (c.body + ' ' + c.title).toLowerCase().includes(w.toLowerCase()));
+    const issues = checkCompliance(`${c.title}\n${c.body}`, db);
+    const blocks = issues.filter((i) => i.level === 'block');
+    if (blocks.length) {
+      toast.error(`Fix before submitting: ${blocks.map((i) => `${i.rule} ("${i.match}")`).join(', ')}`);
+      return;
+    }
+    const flagged = issues.map((i) => `${i.rule}: "${i.match}"`);
     run((d, a) => {
       const x = d.contentItems.find((y) => y.id === c.id);
       if (!x) throw new ops.OpError('Content not found.');
@@ -120,9 +145,9 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
         {
           type: 'marketing_publish',
           title: `Publish to ${x.platform}: ${x.title}`,
-          description: `${x.type.replace('_', ' ')} scheduled ${fmtDateTime(x.scheduledDate)}${AUTO_PUBLISH.has(x.platform) ? ' (auto-publish)' : ' (post manually)'}.\n\n${x.body.slice(0, 400)}${x.body.length > 400 ? '…' : ''}${x.imageUrl ? `\n\nImage: ${x.imageUrl}` : ''}${flagged.length ? `\n\n⚠ Contains prohibited claim(s): ${flagged.join(', ')}` : ''}`,
+          description: `${x.type.replace('_', ' ')} scheduled ${fmtDateTime(x.scheduledDate)}${AUTO_PUBLISH.has(x.platform) ? ' (auto-publish)' : ' (post manually)'}.\n\n${x.body.slice(0, 400)}${x.body.length > 400 ? '…' : ''}${x.imageUrl ? `\n\nImage: ${x.imageUrl}` : ''}${flagged.length ? `\n\n⚠ Compliance warnings: ${flagged.join('; ')}` : ''}`,
           payload: { contentId: x.id },
-          risk: flagged.length ? 'high' : 'low',
+          risk: flagged.length ? 'medium' : 'low',
         },
         a,
       );
@@ -379,7 +404,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
                               className={cn('flex gap-3 rounded-lg border bg-white p-3', c.status === 'failed' ? 'border-red-200' : 'border-slate-200')}
                             >
                               {c.imageUrl ? (
-                                <img src={c.imageUrl} alt="" className="h-16 w-16 shrink-0 rounded-md border object-cover" />
+                                isVideoUrl(c.imageUrl) ? <video src={c.imageUrl} muted className="h-16 w-16 shrink-0 rounded-md border bg-black object-cover" /> : <img src={c.imageUrl} alt="" className="h-16 w-16 shrink-0 rounded-md border object-cover" />
                               ) : (
                                 <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-400">
                                   <Megaphone className="h-5 w-5" />
@@ -473,11 +498,34 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
                       description={`${c.platform} · ${c.type.replace('_', ' ')} · ${fmtDateTime(c.scheduledDate)}`}
                       actions={<StatusPill status={c.status} />}
                     >
-                      {c.imageUrl && <img src={c.imageUrl} alt="" className="mb-2 max-h-48 w-full rounded-md border object-cover" />}
+                      {c.imageUrl && isVideoUrl(c.imageUrl) ? (
+                        <video src={c.imageUrl} controls playsInline className="mb-2 max-h-72 w-full rounded-md border bg-black" />
+                      ) : c.imageUrl ? (
+                        <img src={c.imageUrl} alt="" className="mb-2 max-h-48 w-full rounded-md border object-cover" />
+                      ) : null}
                       <div className="max-h-64 overflow-y-auto whitespace-pre-line rounded-md bg-slate-50 p-3 text-sm text-slate-700">{c.body}</div>
+                      {(() => {
+                        const issues = checkCompliance(`${c.title}\n${c.body}`, db);
+                        if (!issues.length) return <div className="mt-2 text-[11px] text-teal-700">✓ Compliance check passed</div>;
+                        return (
+                          <div className={cn('mt-2 rounded-md border px-2 py-1.5 text-[11px]', issues.some((i) => i.level === 'block') ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800')}>
+                            <b>Compliance:</b> {issues.map((i) => `${i.rule} ("${i.match}")`).join(' · ')}
+                          </div>
+                        );
+                      })()}
                       {c.status === 'failed' && c.error && <div className="mt-2 text-xs text-red-600">Error: {c.error}</div>}
                       <div className="mt-3 flex flex-wrap justify-end gap-2">
                         {pending && <span className="mr-auto self-center text-[11px] text-amber-700">awaiting approval</span>}
+                        {c.type === 'video_script' && !isVideoUrl(c.imageUrl) && c.status !== 'in_review' && (
+                          <Button size="sm" variant="outline" disabled={asking} onClick={() => void ask(makeVideoFor(c))}>
+                            <Clapperboard className="mr-1 h-3.5 w-3.5" /> Make video
+                          </Button>
+                        )}
+                        {c.type !== 'video_script' && c.status !== 'in_review' && (
+                          <Button size="sm" variant="outline" disabled={imaging === c.id} onClick={() => void makeImage(c)}>
+                            <ImagePlus className="mr-1 h-3.5 w-3.5" /> {imaging === c.id ? 'Generating…' : c.imageUrl ? 'New image' : 'Generate image'}
+                          </Button>
+                        )}
                         {c.status !== 'in_review' && (
                           <Button size="sm" variant="outline" onClick={() => setContentDialog({ open: true, item: c })}>
                             <Pencil className="mr-1 h-3.5 w-3.5" /> Edit

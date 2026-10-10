@@ -53,6 +53,17 @@ Authentication → URL Configuration → **Site URL** = your Vercel URL, so sign
 Use `https://<your-render-url>/api/integrations/<shopee|lazada|tiktok_shop>/callback` as the
 redirect URL in each platform's developer console (Settings → Integrations shows the exact URL).
 
+## 7. Media storage, returns and stock fields (once)
+In Supabase → SQL Editor, run these two files (both are safe to re-run):
+- `supabase/marketing-media.sql`: storage for uploaded and AI-generated images and videos.
+- `supabase/team-features.sql`: held stock, expiry date, safety/max stock, pack size, and returns.
+
+## 8. AI images and videos
+- Images work with no setup (free generator). Optional: `POLLINATIONS_TOKEN` on Render for higher limits.
+- Real motion video uses Kling AI: in Render → Environment add `KLING_ACCESS_KEY` and
+  `KLING_SECRET_KEY` from the Kling developer console (paid API credits). Without them,
+  videos are made as animated slideshows from AI images in the browser.
+
 ## Troubleshooting: Vercel says "Deployment Blocked"
 Vercel's free (Hobby) plan only deploys commits whose git author is the account owner.
 Set your own name and GitHub email once (`git config --global user.name "..."` and

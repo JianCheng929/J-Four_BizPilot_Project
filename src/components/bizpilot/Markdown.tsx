@@ -8,14 +8,16 @@ import { cn } from '@/lib/utils';
  */
 function inline(text: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(\[[^\]]+\]\((?:https?:\/\/|mailto:)[^)\s]+\)|\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*)/g;
+  const re = /(!\[[^\]]*\]\(https:\/\/[^)\s]+\)|\[[^\]]+\]\((?:https?:\/\/|mailto:)[^)\s]+\)|\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const t = m[0];
+    const image = /^!\[([^\]]*)\]\((https:\/\/[^)\s]+)\)$/.exec(t);
     const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(t);
-    if (link) out.push(<a key={m.index} href={link[2]} target="_blank" rel="noopener noreferrer" className="font-medium text-teal-700 underline underline-offset-2">{link[1]}</a>);
+    if (image) out.push(<a key={m.index} href={image[2]} target="_blank" rel="noopener noreferrer" className="my-1 inline-block"><img src={image[2]} alt={image[1]} className="max-h-72 max-w-full rounded-lg border object-contain" /></a>);
+    else if (link) out.push(<a key={m.index} href={link[2]} target="_blank" rel="noopener noreferrer" className="font-medium text-teal-700 underline underline-offset-2">{link[1]}</a>);
     else if (t.startsWith('**') || t.startsWith('__')) out.push(<strong key={m.index} className="font-semibold">{t.slice(2, -2)}</strong>);
     else if (t.startsWith('`')) out.push(<code key={m.index} className="rounded bg-slate-100 px-1 text-[0.85em]">{t.slice(1, -1)}</code>);
     else out.push(<em key={m.index}>{t.slice(1, -1)}</em>);

@@ -24,6 +24,7 @@ export const TABLES: Record<CollectionKey, { table: string; order?: string; limi
   tickets: { table: 'support_tickets', order: 'created_at' },
   contentItems: { table: 'content_items', order: 'scheduled_date' },
   campaigns: { table: 'campaigns', order: 'name' },
+  returns: { table: 'return_cases', order: 'created_at' },
   approvals: { table: 'approval_requests', order: 'created_at' },
   auditLog: { table: 'audit_log', order: 'at', limit: 500 },
   notifications: { table: 'notifications', order: 'at', limit: 200 },
@@ -33,7 +34,7 @@ export const TABLES: Record<CollectionKey, { table: string; order?: string; limi
 // Collections displayed newest-first in the UI
 const DESC = new Set<CollectionKey>([
   'stockMovements', 'salesOrders', 'expenses', 'invoices', 'reviews', 'tickets',
-  'approvals', 'auditLog', 'notifications', 'agentTasks', 'purchaseOrders',
+  'approvals', 'auditLog', 'notifications', 'agentTasks', 'purchaseOrders', 'returns',
 ]);
 
 const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);

@@ -13,6 +13,7 @@ import { email } from './routes/email.ts';
 import { agent } from './routes/agent.ts';
 import { pos, tokens } from './routes/pos.ts';
 import { admin } from './routes/admin.ts';
+import { media } from './routes/media.ts';
 import { startAutopilot } from './lib/autopilot.ts';
 
 const app = express();
@@ -40,6 +41,7 @@ app.use('/api/email', email);
 app.use('/api/agent', agent);
 app.use('/api/tokens', tokens);
 app.use('/api/pos', pos);
+app.use('/api/media', media);
 app.use('/admin', admin);
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));

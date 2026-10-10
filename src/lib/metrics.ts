@@ -13,8 +13,9 @@ import type {
 
 const DAY = 24 * 60 * 60 * 1000;
 
+/** Blueprint B2: available to sell = on hand − reserved − unavailable (damaged, expired, quarantined). */
 export function availableStock(p: Product): number {
-  return Math.max(0, p.stock - p.reserved);
+  return Math.max(0, p.stock - p.reserved - (p.unavailable || 0));
 }
 
 export function daysOfStockLeft(p: Product): number {
@@ -249,4 +250,225 @@ export function cashPosition(db: BizPilotDB): CashPosition {
   const capital = Number(db.settings.openingCash) || 0;
   const balance = Math.round((capital + salesIn - expensesOut - purchasesOut) * 100) / 100;
   return { capital, capitalSet: Boolean(db.settings.openingCashDate), salesIn, expensesOut, purchasesOut, balance };
+}
+
+// ---------------------------------------------------------------- inventory health (blueprint B2, B3, A5)
+
+const EXPIRY_WARN_DAYS = 30;
+const SLOW_MOVING_DAYS = 90;
+
+/** Whole days from today until an ISO date (negative = already past). */
+export function daysUntil(isoDate: string): number {
+  const d = new Date(isoDate.length === 10 ? `${isoDate}T23:59:59` : isoDate).getTime();
+  return Math.floor((d - Date.now()) / DAY);
+}
+
+export type InventoryAlertKind = 'out_of_stock' | 'low_stock' | 'expired' | 'expiring' | 'slow_moving' | 'no_sales' | 'held';
+
+export interface InventoryAlert {
+  product: Product;
+  kind: InventoryAlertKind;
+  severity: 'critical' | 'warning' | 'info';
+  detail: string;
+}
+
+/** Deterministic stock alerts: re-running gives the same list for the same data. */
+export function inventoryAlerts(db: BizPilotDB): InventoryAlert[] {
+  const out: InventoryAlert[] = [];
+  const lowDays = db.settings.lowStockThresholdDays;
+  for (const p of db.products) {
+    if (p.status === 'discontinued' || p.status === 'draft') continue;
+    const avail = availableStock(p);
+    const days = daysOfStockLeft(p);
+    if (avail <= 0 && p.stock - p.reserved > 0) {
+      out.push({ product: p, kind: 'out_of_stock', severity: 'critical', detail: `Nothing sellable: all ${p.stock} on hand are reserved or held.` });
+    } else if (avail <= 0) {
+      out.push({ product: p, kind: 'out_of_stock', severity: 'critical', detail: 'Out of stock.' });
+    } else if (avail <= p.reorderLevel || days <= lowDays) {
+      out.push({
+        product: p,
+        kind: 'low_stock',
+        severity: 'warning',
+        detail: `${avail} available${Number.isFinite(days) ? `, about ${days} day(s) left at ${p.avgDailySales}/day` : ''} (reorder level ${p.reorderLevel}).`,
+      });
+    }
+    if (p.expiryDate && p.stock > 0) {
+      const left = daysUntil(p.expiryDate);
+      if (left < 0) {
+        out.push({ product: p, kind: 'expired', severity: 'critical', detail: `Expired on ${p.expiryDate}. Move it to held stock or write it off.` });
+      } else if (left <= EXPIRY_WARN_DAYS) {
+        const sellable = p.avgDailySales * left;
+        out.push({
+          product: p,
+          kind: 'expiring',
+          severity: 'warning',
+          detail: `Expires in ${left} day(s) (${p.expiryDate}). ${p.stock} on hand${p.avgDailySales > 0 ? `, about ${Math.floor(sellable)} will sell by then` : ', no recent sales'}.`,
+        });
+      }
+    }
+    if (p.stock > 0 && p.avgDailySales <= 0) {
+      out.push({ product: p, kind: 'no_sales', severity: 'info', detail: `${p.stock} on hand and no sales in the last 28 days. Consider a promotion or stop reordering.` });
+    } else if (Number.isFinite(days) && days > SLOW_MOVING_DAYS) {
+      out.push({ product: p, kind: 'slow_moving', severity: 'info', detail: `${days} days of stock at the current sales rate: overstocked or slow-moving.` });
+    }
+    if ((p.unavailable || 0) > 0) {
+      out.push({ product: p, kind: 'held', severity: 'info', detail: `${p.unavailable} unit(s) held as damaged, expired or quarantined (worth ${(p.unavailable * p.unitCost).toFixed(2)} at cost).` });
+    }
+  }
+  const rank = { critical: 0, warning: 1, info: 2 };
+  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
+}
+
+export interface ValuationRow {
+  product: Product;
+  onHand: number;
+  costValue: number;
+  retailValue: number;
+  heldValue: number;
+}
+
+/** Blueprint D3 "Inventory valuation": what stock on hand is worth at cost and at selling price. */
+export function stockValuation(db: BizPilotDB) {
+  const rows: ValuationRow[] = db.products
+    .filter((p) => p.stock > 0)
+    .map((p) => ({
+      product: p,
+      onHand: p.stock,
+      costValue: p.stock * p.unitCost,
+      retailValue: (p.stock - (p.unavailable || 0)) * p.price,
+      heldValue: (p.unavailable || 0) * p.unitCost,
+    }))
+    .sort((a, b) => b.costValue - a.costValue);
+  const sum = (k: keyof Omit<ValuationRow, 'product'>) => rows.reduce((s, r) => s + r[k], 0);
+  return { rows, totalCost: sum('costValue'), totalRetail: sum('retailValue'), totalHeld: sum('heldValue'), units: sum('onHand') };
+}
+
+// ---------------------------------------------------------------- margins (blueprint D4)
+
+export interface MarginRow {
+  product: Product;
+  marginPct: number;
+  profitPerUnit: number;
+  targetPrice: number;
+  flag: 'below_cost' | 'below_target' | 'ok' | 'no_price';
+}
+
+/** Products selling below cost or under the owner's target margin. */
+export function marginCheck(db: BizPilotDB): MarginRow[] {
+  const target = Number(db.settings.targetMarginPct) || 30;
+  const rank = { below_cost: 0, no_price: 1, below_target: 2, ok: 3 };
+  return db.products
+    .filter((p) => p.status !== 'discontinued')
+    .map((p) => {
+      const marginPct = p.price > 0 ? ((p.price - p.unitCost) / p.price) * 100 : 0;
+      const flag: MarginRow['flag'] =
+        p.price <= 0 ? 'no_price' : p.price < p.unitCost ? 'below_cost' : marginPct < target ? 'below_target' : 'ok';
+      return {
+        product: p,
+        marginPct: Math.round(marginPct * 10) / 10,
+        profitPerUnit: Math.round((p.price - p.unitCost) * 100) / 100,
+        targetPrice: Math.ceil(suggestedPrice(p.unitCost, target) * 10) / 10,
+        flag,
+      };
+    })
+    .sort((a, b) => rank[a.flag] - rank[b.flag] || a.marginPct - b.marginPct);
+}
+
+/** Three launch price options (budget, standard, premium) around the target margin. */
+export function priceOptions(unitCost: number, targetMarginPct: number) {
+  const opts = [
+    { label: 'Budget', margin: Math.max(5, targetMarginPct - 10) },
+    { label: 'Standard', margin: targetMarginPct },
+    { label: 'Premium', margin: Math.min(90, targetMarginPct + 15) },
+  ];
+  return opts.map((o) => ({ ...o, price: Math.ceil(suggestedPrice(unitCost, o.margin) * 10) / 10 }));
+}
+
+// ---------------------------------------------------------------- cash flow forecast (blueprint D6)
+
+export interface CashFlowItem {
+  label: string;
+  amount: number;
+  date: string;
+  kind: 'actual' | 'estimated';
+}
+
+/**
+ * Money expected in and out over the next `days` days, from records the owner
+ * entered: unpaid invoices not tied to an order (in), unpaid bills and repeating
+ * expenses (out). Repeating expenses are estimates from last month's amounts.
+ */
+export function cashFlowForecast(db: BizPilotDB, days = 30) {
+  const position = cashPosition(db);
+  const horizon = Date.now() + days * DAY;
+  const inItems: CashFlowItem[] = [];
+  const outItems: CashFlowItem[] = [];
+  // Sales orders already count as money in (cashPosition), so only invoices
+  // without a counted order are expected money in.
+  for (const i of db.invoices) {
+    if ((i.status === 'issued' || i.status === 'overdue') && new Date(i.dueDate).getTime() <= horizon) {
+      const order = i.orderId ? db.salesOrders.find((o) => o.id === i.orderId) : undefined;
+      if (order && order.status !== 'cancelled' && order.paymentStatus !== 'refunded') continue;
+      inItems.push({ label: `${i.invoiceNumber} · ${i.customerName}${i.status === 'overdue' ? ' (overdue)' : ''}`, amount: i.total, date: i.dueDate, kind: 'actual' });
+    }
+  }
+  for (const e of db.expenses) {
+    if (!e.paid && (!e.dueDate || new Date(e.dueDate).getTime() <= horizon)) {
+      outItems.push({ label: `${e.category}: ${e.description || 'bill'}`, amount: e.amount, date: e.dueDate || e.date, kind: 'actual' });
+    }
+  }
+  // Repeating costs paid in the last 30 days are expected again.
+  const seen = new Set<string>();
+  for (const e of db.expenses) {
+    if (!e.recurring || !e.paid || Date.now() - new Date(e.date).getTime() > 30 * DAY) continue;
+    const key = `${e.category}|${e.description}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const next = new Date(new Date(e.date).getTime() + 30 * DAY).toISOString();
+    if (new Date(next).getTime() <= horizon) outItems.push({ label: `${e.category}: ${e.description || 'repeating cost'} (repeats monthly)`, amount: e.amount, date: next, kind: 'estimated' });
+  }
+  for (const po of db.purchaseOrders) {
+    if (po.status === 'pending_approval' || po.status === 'approved') {
+      outItems.push({ label: `${po.poNumber} (waiting to be placed)`, amount: po.totalCost, date: po.createdAt, kind: 'estimated' });
+    }
+  }
+  const byDate = (a: CashFlowItem, b: CashFlowItem) => a.date.localeCompare(b.date);
+  inItems.sort(byDate);
+  outItems.sort(byDate);
+  const totalIn = inItems.reduce((s, x) => s + x.amount, 0);
+  const totalOut = outItems.reduce((s, x) => s + x.amount, 0);
+  const projected = Math.round((position.balance + totalIn - totalOut) * 100) / 100;
+  // Worst case: everything going out leaves before anything comes in.
+  const worstCase = Math.round((position.balance - totalOut) * 100) / 100;
+  return { days, position, inItems, outItems, totalIn, totalOut, projected, worstCase, lowCash: worstCase < 0 };
+}
+
+// ---------------------------------------------------------------- returns (blueprint A6)
+
+export function returnStats(db: BizPilotDB, days = 90) {
+  const recent = db.returns.filter((r) => Date.now() - new Date(r.createdAt).getTime() <= days * DAY);
+  const byReason = new Map<string, number>();
+  const byProduct = new Map<string, number>();
+  for (const r of recent) {
+    byReason.set(r.reason, (byReason.get(r.reason) ?? 0) + r.quantity);
+    if (r.productId) byProduct.set(r.productId, (byProduct.get(r.productId) ?? 0) + r.quantity);
+  }
+  const soldUnits = new Map<string, number>();
+  for (const o of db.salesOrders) {
+    if (o.status === 'cancelled' || Date.now() - new Date(o.date).getTime() > days * DAY) continue;
+    for (const l of o.lines) if (l.productId) soldUnits.set(l.productId, (soldUnits.get(l.productId) ?? 0) + l.quantity);
+  }
+  const products = [...byProduct.entries()]
+    .map(([id, qty]) => {
+      const sold = soldUnits.get(id) ?? 0;
+      return { productId: id, returned: qty, sold, ratePct: sold > 0 ? Math.round((qty / sold) * 1000) / 10 : null };
+    })
+    .sort((a, b) => b.returned - a.returned);
+  return {
+    days,
+    open: db.returns.filter((r) => r.status === 'open').length,
+    total: recent.length,
+    reasons: [...byReason.entries()].sort((a, b) => b[1] - a[1]),
+    products,
+  };
 }

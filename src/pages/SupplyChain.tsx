@@ -16,6 +16,7 @@ import { SupplierDialog } from '@/components/bizpilot/SupplierDialog';
 import { PurchaseOrderDialog } from '@/components/bizpilot/PurchaseOrderDialog';
 import { ReceivePODialog } from '@/components/bizpilot/ReceivePODialog';
 import { submitExistingPO } from '@/components/bizpilot/actions';
+import { ReturnsTab } from '@/components/bizpilot/ReturnsTab';
 
 const PO_FILTERS = ['open', 'all', 'draft', 'pending_approval', 'ordered', 'partially_received', 'received', 'cancelled'] as const;
 
@@ -122,6 +123,7 @@ export function SupplyChain() {
           <TabsTrigger value="orders">Purchase orders</TabsTrigger>
           <TabsTrigger value="suppliers">Suppliers</TabsTrigger>
           <TabsTrigger value="compare">Compare suppliers</TabsTrigger>
+          <TabsTrigger value="returns">Returns{db.returns.some((r) => r.status === 'open') ? ` (${db.returns.filter((r) => r.status === 'open').length})` : ''}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="orders" className="mt-4">
@@ -381,6 +383,10 @@ export function SupplyChain() {
               </div>
             </SectionCard>
           )}
+        </TabsContent>
+
+        <TabsContent value="returns" className="mt-4">
+          <ReturnsTab />
         </TabsContent>
       </Tabs>
 

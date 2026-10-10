@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge';
 import { fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { Markdown } from '@/components/bizpilot/Markdown';
+import { VideoMaker, type VideoPlan } from '@/components/bizpilot/VideoMaker';
 
 /**
  * Command Centre: a chat with WorkBuddy. Each chat keeps its history, so the
@@ -109,6 +110,32 @@ function chatsFrom(tasks: AgentTask[]): Chat[] {
   return [...chats.values()].sort((a, b) => b.lastAt.localeCompare(a.lastAt));
 }
 
+/** Images and videos WorkBuddy made in this turn. */
+function MediaOutputs({ task }: { task: AgentTask }) {
+  const media = task.events
+    .filter((e) => e.kind === 'artifact' && (e.data as { media?: string } | undefined)?.media)
+    .map((e) => e.data as { media: 'image' | 'video'; url?: string } & Partial<VideoPlan>);
+  if (!media.length) return null;
+  const images = media.filter((m) => m.media === 'image' && m.url);
+  const videos = media.filter((m) => m.media === 'video' && m.contentId);
+  return (
+    <div className="space-y-2">
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {images.map((m, i) => (
+            <a key={i} href={m.url} target="_blank" rel="noreferrer" title="Open full size">
+              <img src={m.url} alt="Generated" className="h-40 w-40 rounded-lg border object-cover sm:h-48 sm:w-48" />
+            </a>
+          ))}
+        </div>
+      )}
+      {videos.map((v) => (
+        <VideoMaker key={v.contentId} plan={{ contentId: v.contentId!, title: v.title ?? 'Video', aspect: v.aspect ?? '9:16', scenes: v.scenes ?? [], engine: v.engine }} />
+      ))}
+    </div>
+  );
+}
+
 /** One exchange: the owner's message, WorkBuddy's steps (folded once done) and its answer. */
 function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: () => void; pending: number; onNavigate?: (p: PageKey) => void }) {
   const running = ACTIVE.includes(task.status);
@@ -128,6 +155,7 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
         <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-700"><Bot className="h-4 w-4" /></div>
         <div className="min-w-0 flex-1 space-y-2">
           {running ? (
+            <>
             <ol className="border-l border-slate-100 pl-1">
               {steps.map((e, i) => <EventRow key={`${e.at}-${i}`} e={e} />)}
               <li className="flex items-center gap-2 pb-2 text-xs text-slate-500">
@@ -135,6 +163,8 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
                 <Button variant="outline" size="sm" className="ml-2 h-6 px-2 text-xs" onClick={onStop}><Square className="mr-1 h-3 w-3" /> Stop</Button>
               </li>
             </ol>
+            <MediaOutputs task={task} />
+            </>
           ) : (
             <>
               {(toolCalls > 0 || steps.length > 2) && (
@@ -150,6 +180,7 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
                   <Markdown text={answer} className="text-slate-800" />
                 </div>
               )}
+              <MediaOutputs task={task} />
               {created > 0 && (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
                   {created} record(s) created or requested.

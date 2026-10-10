@@ -9,6 +9,8 @@ import { SalesTab } from '@/components/bizpilot/finance/SalesTab';
 import { ExpensesTab } from '@/components/bizpilot/finance/ExpensesTab';
 import { InvoicesTab } from '@/components/bizpilot/finance/InvoicesTab';
 import { PnLTab } from '@/components/bizpilot/finance/PnLTab';
+import { CashFlowTab } from '@/components/bizpilot/finance/CashFlowTab';
+import { MarginCheck } from '@/components/bizpilot/MarginCheck';
 import { PricingCalculator } from '@/components/bizpilot/PricingCalculator';
 
 const DAY = 86400000;
@@ -47,6 +49,7 @@ export function Finance() {
           <TabsTrigger value="expenses">Expenses</TabsTrigger>
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
           <TabsTrigger value="pnl">P&amp;L</TabsTrigger>
+          <TabsTrigger value="cash">Cash flow</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
         </TabsList>
         <TabsContent value="sales" className="mt-4">
@@ -66,7 +69,11 @@ export function Finance() {
         <TabsContent value="pnl" className="mt-4">
           <PnLTab onGoToSales={() => setTab('sales')} />
         </TabsContent>
-        <TabsContent value="pricing" className="mt-4">
+        <TabsContent value="cash" className="mt-4">
+          <CashFlowTab />
+        </TabsContent>
+        <TabsContent value="pricing" className="mt-4 space-y-4">
+          <MarginCheck />
           <PricingCalculator />
         </TabsContent>
       </Tabs>

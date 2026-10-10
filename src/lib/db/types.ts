@@ -42,6 +42,7 @@ export interface BusinessSettings {
   shipFromPostcode: string;
   defaultTaxRate: number; // % SST applied on invoices, 0 if not registered
   invoicePrefix: string;
+  targetMarginPct: number; // gross margin the owner aims for, used for margin alerts
 }
 
 export interface Product {
@@ -57,8 +58,13 @@ export interface Product {
   weightKg: number; // for courier quotes
   stock: number; // on hand
   reserved: number; // reserved for unfulfilled orders
+  unavailable: number; // on hand but not sellable: damaged, expired or quarantined
   incoming: number; // ordered from suppliers, not yet received
   reorderLevel: number;
+  safetyStock: number; // buffer kept for demand swings during the lead time
+  maxStock: number; // shelf ceiling for reorders, 0 = no limit
+  orderMultiple: number; // supplier pack size, e.g. 12 = order in boxes of 12
+  expiryDate: string; // earliest expiry of stock on hand (YYYY-MM-DD), '' = none
   avgDailySales: number; // units/day, recalculated from real sales history
   status: 'active' | 'discontinued' | 'seasonal' | 'draft';
   // SKU / item ids on external channels, used to match imported orders
@@ -304,7 +310,8 @@ export type ApprovalType =
   | 'einvoice_submit'
   | 'shipment_booking'
   | 'stock_adjustment'
-  | 'customer_message';
+  | 'customer_message'
+  | 'refund';
 
 export interface ApprovalRequest {
   id: string;
@@ -321,6 +328,30 @@ export interface ApprovalRequest {
   createdAt: string;
   decidedAt?: string | null;
   decidedBy?: string | null;
+}
+
+export type ReturnReason = 'damaged' | 'defective' | 'wrong_item' | 'not_as_described' | 'changed_mind' | 'expired' | 'other';
+export type ReturnCondition = 'unopened' | 'opened' | 'damaged' | 'defective';
+export type ReturnResolution = 'restock' | 'quarantine' | 'dispose' | 'supplier_return';
+
+/** Blueprint A6: a customer return and what happened to the goods and the money. */
+export interface ReturnCase {
+  id: string;
+  returnNumber: string;
+  orderId: string | null;
+  productId: string | null;
+  customerName: string;
+  quantity: number;
+  reason: ReturnReason;
+  condition: ReturnCondition;
+  notes: string;
+  photoUrl: string;
+  status: 'open' | 'resolved' | 'rejected';
+  resolution: ReturnResolution | null; // what happened to the goods
+  refundAmount: number; // 0 = no refund
+  refundStatus: 'none' | 'pending_approval' | 'refunded';
+  createdAt: string;
+  resolvedAt?: string | null;
 }
 
 export interface AuditLogEntry {
@@ -378,6 +409,7 @@ export interface BizPilotDB {
   tickets: SupportTicket[];
   contentItems: ContentItem[];
   campaigns: Campaign[];
+  returns: ReturnCase[];
   approvals: ApprovalRequest[];
   auditLog: AuditLogEntry[];
   notifications: AppNotification[];

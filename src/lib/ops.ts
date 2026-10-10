@@ -9,6 +9,7 @@ import type {
   InvoiceLine,
   Product,
   PurchaseOrder,
+  ReturnCase,
   PurchaseOrderLine,
   Review,
   SalesOrder,
@@ -102,6 +103,10 @@ export interface ProductInput {
   price?: number;
   weightKg?: number;
   reorderLevel?: number;
+  safetyStock?: number;
+  maxStock?: number;
+  orderMultiple?: number;
+  expiryDate?: string;
   status?: Product['status'];
   openingStock?: number;
   channelSkus?: Record<string, string>;
@@ -126,8 +131,13 @@ export function createProduct(db: BizPilotDB, input: ProductInput, actor: string
     weightKg: input.weightKg ?? 0.5,
     stock: 0,
     reserved: 0,
+    unavailable: 0,
     incoming: 0,
     reorderLevel: input.reorderLevel ?? 0,
+    safetyStock: input.safetyStock ?? 0,
+    maxStock: input.maxStock ?? 0,
+    orderMultiple: Math.max(1, input.orderMultiple ?? 1),
+    expiryDate: input.expiryDate ?? '',
     avgDailySales: 0,
     status: input.status ?? 'active',
     channelSkus: input.channelSkus ?? {},
@@ -144,8 +154,9 @@ export function updateProduct(db: BizPilotDB, id: string, patch: Partial<Product
   const p = db.products.find((x) => x.id === id);
   if (!p) throw new OpError('Product not found.');
   // Stock levels only change through stock movements, never by direct edit.
-  const { stock: _s, reserved: _r, incoming: _i, id: _id, ...safe } = patch;
+  const { stock: _s, reserved: _r, incoming: _i, unavailable: _u, id: _id, ...safe } = patch;
   Object.assign(p, safe);
+  if (!(p.orderMultiple >= 1)) p.orderMultiple = 1;
   audit(db, actor, 'update', 'product', p.sku, `Product updated: ${Object.keys(safe).join(', ')}`);
   return p;
 }
@@ -173,6 +184,11 @@ export function recordStockMovement(
   }
   const before = p.stock;
   p.stock += delta;
+  // Writing off damaged or expired goods removes them from held stock first.
+  if (type === 'out' && (p.unavailable || 0) > 0 && /damag|expir|quarantin|defect/i.test(reason)) {
+    p.unavailable = Math.max(0, p.unavailable - quantity);
+  }
+  if ((p.unavailable || 0) > p.stock) p.unavailable = p.stock;
   const mv: StockMovement = { id: newId(), productId, type, quantity, reason, reference, date: now(), actor };
   db.stockMovements.unshift(mv);
   audit(db, actor, 'stock_' + type, 'product', p.sku, `${p.name}: ${before} → ${p.stock} (${reason})`);
@@ -180,8 +196,25 @@ export function recordStockMovement(
   return mv;
 }
 
+/** Blueprint B2: on hand − reserved − unavailable (damaged, expired, quarantined). */
 export function availableToSell(p: Product): number {
-  return Math.max(0, p.stock - p.reserved);
+  return Math.max(0, p.stock - p.reserved - (p.unavailable || 0));
+}
+
+/**
+ * Set how many units on hand are not sellable (damaged, expired or
+ * quarantined). They stay on hand until written off with a stock-out.
+ */
+export function setHeldStock(db: BizPilotDB, productId: string, quantity: number, reason: string, actor: string): Product {
+  const p = db.products.find((x) => x.id === productId);
+  if (!p) throw new OpError('Product not found.');
+  if (!Number.isInteger(quantity) || quantity < 0) throw new OpError('Held quantity must be a whole number, 0 or more.');
+  if (quantity > p.stock) throw new OpError(`Only ${p.stock} of ${p.name} on hand.`);
+  const before = p.unavailable || 0;
+  p.unavailable = quantity;
+  audit(db, actor, 'stock_hold', 'product', p.sku, `${p.name}: held ${before} → ${quantity} (${reason})`);
+  checkLowStock(db, p);
+  return p;
 }
 
 function checkLowStock(db: BizPilotDB, p: Product) {
@@ -209,44 +242,91 @@ export function recalcAvgDailySales(db: BizPilotDB, days = 28) {
   for (const p of db.products) p.avgDailySales = round2((units.get(p.id) ?? 0) / days);
 }
 
+export type ReorderUrgency = 'stockout_risk' | 'reorder_now' | 'watch';
+
 export interface ReorderSuggestion {
   product: Product;
   supplier: Supplier | undefined;
   available: number;
   daysLeft: number | null;
   suggestedQty: number;
+  urgency: ReorderUrgency;
+  stockoutDate: string | null; // projected date available stock runs out
   reason: string;
 }
 
-/** Products that need replenishing, with a suggested quantity (blueprint B3). */
+const REVIEW_DAYS = 30; // order enough to last the lead time plus a month
+
+/**
+ * Products that need replenishing, with a suggested quantity (blueprint B3).
+ * Uses each product's reorder level, safety stock, max stock and order
+ * multiple, and the supplier's lead time and minimum order quantity.
+ */
 export function reorderSuggestions(db: BizPilotDB): ReorderSuggestion[] {
   const out: ReorderSuggestion[] = [];
   for (const p of db.products) {
     if (p.status === 'discontinued' || p.status === 'draft') continue;
     const supplier = p.supplierId ? db.suppliers.find((s) => s.id === p.supplierId) : undefined;
     const lead = supplier?.leadTimeDays ?? 7;
+    const demand = p.avgDailySales;
     const avail = availableToSell(p);
-    const daysLeft = p.avgDailySales > 0 ? Math.floor(avail / p.avgDailySales) : null;
+    const daysLeft = demand > 0 ? Math.floor(avail / demand) : null;
     const projected = avail + p.incoming;
-    const lowByLevel = projected <= p.reorderLevel;
-    const lowByDays = daysLeft !== null && daysLeft <= Math.max(lead, db.settings.lowStockThresholdDays) && projected - p.avgDailySales * lead < p.reorderLevel + p.avgDailySales * 7;
-    if (!lowByLevel && !lowByDays) continue;
-    // Cover lead time + 30 days of demand, plus the reorder level as safety stock.
-    const target = Math.ceil(p.avgDailySales * (lead + 30) + p.reorderLevel);
-    let qty = Math.max(target - projected, p.reorderLevel > 0 ? p.reorderLevel : 1);
-    if (supplier?.minOrderQty) qty = Math.max(qty, supplier.minOrderQty);
+    const safety = p.safetyStock || p.reorderLevel;
+    const atArrival = projected - demand * lead;
+    const reasons: string[] = [];
+
+    let urgency: ReorderUrgency | null = null;
+    if (avail <= 0 && p.incoming <= 0) {
+      urgency = 'stockout_risk';
+      reasons.push('No sellable stock and nothing incoming.');
+    } else if (demand > 0 && atArrival <= 0) {
+      urgency = 'stockout_risk';
+      reasons.push(`Runs out in ~${daysLeft} day(s), before a new order could arrive (${lead}-day lead time).`);
+    } else if (projected <= p.reorderLevel) {
+      urgency = 'reorder_now';
+      reasons.push(`${projected} available + incoming is at or below the reorder level of ${p.reorderLevel}.`);
+    } else if (demand > 0 && atArrival <= safety) {
+      urgency = 'watch';
+      reasons.push(`By the time a new order arrives only ~${Math.max(0, Math.floor(atArrival))} would be left (safety stock ${safety}).`);
+    } else if (daysLeft !== null && daysLeft <= db.settings.lowStockThresholdDays) {
+      urgency = 'watch';
+      reasons.push(`~${daysLeft} day(s) of stock left.`);
+    }
+    if (!urgency) continue;
+
+    let qty = Math.ceil(demand * (lead + REVIEW_DAYS) + safety - projected);
+    if (qty <= 0) qty = Math.max(p.reorderLevel - projected + 1, p.reorderLevel, 1);
+    if (supplier?.minOrderQty && qty < supplier.minOrderQty) {
+      reasons.push(`Raised to the supplier minimum of ${supplier.minOrderQty}.`);
+      qty = supplier.minOrderQty;
+    }
+    const multiple = p.orderMultiple > 1 ? p.orderMultiple : 1;
+    if (multiple > 1 && qty % multiple) {
+      qty = Math.ceil(qty / multiple) * multiple;
+      reasons.push(`Rounded up to packs of ${multiple}.`);
+    }
+    if (p.maxStock > 0 && projected + qty > p.maxStock) {
+      const room = Math.max(0, p.maxStock - projected);
+      const capped = multiple > 1 ? Math.floor(room / multiple) * multiple : room;
+      reasons.push(`Capped so stock stays within the maximum of ${p.maxStock}.`);
+      qty = capped;
+    }
+    if (qty <= 0) continue;
+    if (p.incoming > 0) reasons.push(`${p.incoming} already incoming.`);
     out.push({
       product: p,
       supplier,
       available: avail,
       daysLeft,
       suggestedQty: qty,
-      reason: lowByLevel
-        ? `${projected} available+incoming ≤ reorder level ${p.reorderLevel}`
-        : `~${daysLeft} days of stock left vs ${lead}-day lead time`,
+      urgency,
+      stockoutDate: demand > 0 ? new Date(Date.now() + (avail / demand) * DAY).toISOString().slice(0, 10) : null,
+      reason: reasons.join(' '),
     });
   }
-  return out.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+  const rank = { stockout_risk: 0, reorder_now: 1, watch: 2 };
+  return out.sort((a, b) => rank[a.urgency] - rank[b.urgency] || (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
 }
 
 // ---------------------------------------------------------------- suppliers & purchasing
@@ -384,6 +464,12 @@ export function receivePurchaseOrder(
     }
   }
   const complete = po.lines.every((l) => (l.receivedQty ?? 0) >= l.quantity);
+  if (!complete) {
+    const short = po.lines
+      .filter((l) => (l.receivedQty ?? 0) < l.quantity)
+      .map((l) => `${db.products.find((x) => x.id === l.productId)?.name ?? 'item'} ${l.receivedQty ?? 0} of ${l.quantity}`);
+    notify(db, `Short delivery: ${po.poNumber}`, `Received so far: ${short.join(', ')}. Check with the supplier before paying the full bill.`, 'warning');
+  }
   po.status = complete ? 'received' : 'partially_received';
   if (complete) po.receivedAt = now();
   recalcSupplierStats(db);
@@ -848,5 +934,120 @@ export function applyApprovedAction(db: BizPilotDB, req: ApprovalRequest, actor:
     case 'customer_message': {
       return external.sentTo ? `Message emailed to ${external.sentTo}.` : 'Message approved.';
     }
+    case 'refund': {
+      const ret = db.returns.find((x) => x.id === p.returnId);
+      if (!ret) throw new OpError('Return case no longer exists.');
+      if (ret.refundStatus === 'refunded') return `${ret.returnNumber} was already refunded.`;
+      const amount = round2(Number(p.amount ?? ret.refundAmount));
+      ret.refundStatus = 'refunded';
+      ret.refundAmount = amount;
+      addExpense(db, { category: 'Refunds', description: `Refund for ${ret.returnNumber}${ret.customerName ? ` (${ret.customerName})` : ''}`, amount, date: now(), recurring: false, paid: true, dueDate: null }, actor);
+      audit(db, actor, 'execute', 'return', ret.returnNumber, `Refunded RM${amount.toFixed(2)}`);
+      return `Refund of RM${amount.toFixed(2)} recorded for ${ret.returnNumber}. Pay the customer through your payment channel.`;
+    }
   }
+}
+
+// ---------------------------------------------------------------- returns (blueprint A6)
+
+export interface ReturnInput {
+  orderId?: string | null;
+  productId?: string | null;
+  customerName?: string;
+  quantity: number;
+  reason: ReturnCase['reason'];
+  condition: ReturnCase['condition'];
+  notes?: string;
+  photoUrl?: string;
+}
+
+export function createReturn(db: BizPilotDB, input: ReturnInput, actor: string): ReturnCase {
+  if (!Number.isInteger(input.quantity) || input.quantity <= 0) throw new OpError('Quantity must be a whole number above 0.');
+  const order = input.orderId ? db.salesOrders.find((o) => o.id === input.orderId || o.orderNumber === input.orderId) : undefined;
+  if (input.orderId && !order) throw new OpError('Order not found.');
+  const product = input.productId ? findProduct(db, input.productId) : undefined;
+  if (input.productId && !product) throw new OpError('Product not found.');
+  if (order && product) {
+    const line = order.lines.find((l) => l.productId === product.id);
+    if (!line) throw new OpError(`${order.orderNumber} has no ${product.name}.`);
+    if (input.quantity > line.quantity) throw new OpError(`${order.orderNumber} only had ${line.quantity} × ${product.name}.`);
+  }
+  const ret: ReturnCase = {
+    id: newId(),
+    returnNumber: nextNumber(db.returns.map((r) => r.returnNumber), 'RET'),
+    orderId: order?.id ?? null,
+    productId: product?.id ?? null,
+    customerName: input.customerName?.trim() || order?.customerName || '',
+    quantity: input.quantity,
+    reason: input.reason,
+    condition: input.condition,
+    notes: input.notes ?? '',
+    photoUrl: input.photoUrl ?? '',
+    status: 'open',
+    resolution: null,
+    refundAmount: 0,
+    refundStatus: 'none',
+    createdAt: now(),
+    resolvedAt: null,
+  };
+  db.returns.unshift(ret);
+  audit(db, actor, 'create', 'return', ret.returnNumber, `${ret.quantity} × ${product?.name ?? 'item'}: ${ret.reason}`);
+  // Blueprint A6: flag product-quality patterns.
+  if (product) {
+    const recent = db.returns.filter((r) => r.productId === product.id && ['damaged', 'defective'].includes(r.reason) && Date.now() - new Date(r.createdAt).getTime() < 30 * DAY);
+    if (recent.length >= 3) notify(db, `Quality issue: ${product.name}`, `${recent.length} damaged/defective returns in 30 days. Check the batch, packaging or supplier.`, 'warning');
+  }
+  return ret;
+}
+
+/**
+ * Close a return: what happens to the goods (restock, quarantine, dispose,
+ * send back to supplier) and an optional refund, which goes to Approvals.
+ */
+export function resolveReturn(
+  db: BizPilotDB,
+  id: string,
+  resolution: ReturnCase['resolution'],
+  refundAmount: number,
+  actor: string,
+): { ret: ReturnCase; approval: ApprovalRequest | null } {
+  const ret = db.returns.find((r) => r.id === id || r.returnNumber === id);
+  if (!ret) throw new OpError('Return case not found.');
+  if (ret.status !== 'open') throw new OpError(`${ret.returnNumber} is already ${ret.status}.`);
+  if (!resolution) throw new OpError('Choose what happens to the goods.');
+  if (!(refundAmount >= 0)) throw new OpError('Refund must be 0 or more.');
+  const order = ret.orderId ? db.salesOrders.find((o) => o.id === ret.orderId) : undefined;
+  if (order && refundAmount > order.total) throw new OpError(`Refund is more than the order total of RM${order.total.toFixed(2)}.`);
+  const p = ret.productId ? db.products.find((x) => x.id === ret.productId) : undefined;
+  if (p && (resolution === 'restock' || resolution === 'quarantine')) {
+    recordStockMovement(db, p.id, 'in', ret.quantity, `Customer return ${ret.returnNumber}${resolution === 'quarantine' ? ' (quarantined)' : ''}`, ret.returnNumber, actor);
+    if (resolution === 'quarantine') p.unavailable = Math.min(p.stock, (p.unavailable || 0) + ret.quantity);
+  }
+  ret.resolution = resolution;
+  ret.status = 'resolved';
+  ret.resolvedAt = now();
+  let approval: ApprovalRequest | null = null;
+  if (refundAmount > 0) {
+    ret.refundAmount = round2(refundAmount);
+    ret.refundStatus = 'pending_approval';
+    approval = requestApproval(db, {
+      type: 'refund',
+      title: `Refund ${ret.returnNumber}: RM${ret.refundAmount.toFixed(2)}${ret.customerName ? ` to ${ret.customerName}` : ''}`,
+      description: `${ret.quantity} × ${p?.name ?? 'item'} returned (${ret.reason.replace(/_/g, ' ')}, ${ret.condition}). Goods: ${resolution.replace('_', ' ')}.${order ? ` Order ${order.orderNumber}, total RM${order.total.toFixed(2)}.` : ''}`,
+      payload: { returnId: ret.id, amount: ret.refundAmount },
+      amount: ret.refundAmount,
+    }, actor);
+  }
+  audit(db, actor, 'resolve', 'return', ret.returnNumber, `Goods ${resolution}${refundAmount > 0 ? `, refund RM${refundAmount} requested` : ''}`);
+  return { ret, approval };
+}
+
+export function rejectReturn(db: BizPilotDB, id: string, why: string, actor: string): ReturnCase {
+  const ret = db.returns.find((r) => r.id === id);
+  if (!ret) throw new OpError('Return case not found.');
+  ret.status = 'rejected';
+  ret.resolvedAt = now();
+  ret.notes = [ret.notes, `Rejected: ${why}`].filter(Boolean).join('\n');
+  audit(db, actor, 'reject', 'return', ret.returnNumber, why);
+  return ret;
 }

@@ -67,6 +67,23 @@ Report only what needs action:
 - **Reorder level check:** if the reorder level is below the lead time × daily sales,
   raise it with `update_product` and say so.
 
+## 5b. Stock health, expiry, held stock and returns
+
+- Start with `get_inventory_health`: it lists out-of-stock, low, expiring (30 days),
+  expired, no-sales, slow-moving and held items, plus stock value at cost and price.
+- **Expired or damaged stock:** move it out of sellable stock with `hold_stock`
+  (sets the total held quantity). Writing it off later uses `record_stock_movement`
+  out with reason "Damaged" or "Expired", which also clears the held units.
+- **Expiring soon:** if expected sales before expiry are below stock on hand, draft a
+  clearance post with `draft_content` and suggest a discount via `request_price_change`.
+- **Reorder policy:** `get_reorder_suggestions` already applies each product's safety
+  stock, max stock and pack size (`orderMultiple`) and the supplier MOQ, and returns an
+  urgency (stockout_risk, reorder_now, watch) and a projected stockout date. Set missing
+  policy values with `update_product` when the owner tells you them.
+- **Returns:** `record_return`, then `resolve_return` (restock, quarantine, dispose,
+  supplier_return). Refunds go to approval. Use `list_returns` patterns to flag a
+  product or supplier with repeated damaged or defective returns.
+
 ## 6. Finish
 
 Answer in at most 10 lines:

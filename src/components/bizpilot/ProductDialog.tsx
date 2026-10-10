@@ -21,6 +21,10 @@ interface Form {
   price: string;
   weightKg: string;
   reorderLevel: string;
+  safetyStock: string;
+  maxStock: string;
+  orderMultiple: string;
+  expiryDate: string;
   status: Product['status'];
   openingStock: string;
   shopee: string;
@@ -39,6 +43,10 @@ const blank: Form = {
   price: '',
   weightKg: '0.5',
   reorderLevel: '0',
+  safetyStock: '0',
+  maxStock: '0',
+  orderMultiple: '1',
+  expiryDate: '',
   status: 'active',
   openingStock: '0',
   shopee: '',
@@ -58,6 +66,10 @@ function fromProduct(p: Product): Form {
     price: String(p.price),
     weightKg: String(p.weightKg ?? 0.5),
     reorderLevel: String(p.reorderLevel),
+    safetyStock: String(p.safetyStock ?? 0),
+    maxStock: String(p.maxStock ?? 0),
+    orderMultiple: String(p.orderMultiple || 1),
+    expiryDate: p.expiryDate ?? '',
     status: p.status,
     openingStock: '0',
     shopee: p.channelSkus?.shopee ?? '',
@@ -98,6 +110,12 @@ export function ProductDialog({
     const weightKg = num(form.weightKg);
     const reorderLevel = num(form.reorderLevel);
     const opening = num(form.openingStock);
+    const safetyStock = num(form.safetyStock);
+    const maxStock = num(form.maxStock);
+    const orderMultiple = num(form.orderMultiple);
+    if (!(safetyStock >= 0) || !Number.isInteger(safetyStock)) e.safetyStock = 'Whole number, 0 or more';
+    if (!(maxStock >= 0) || !Number.isInteger(maxStock)) e.maxStock = 'Whole number, 0 = no limit';
+    if (!(orderMultiple >= 1) || !Number.isInteger(orderMultiple)) e.orderMultiple = 'Whole number, 1 or more';
     if (!(unitCost >= 0)) e.unitCost = 'Enter a cost (0 or more)';
     if (!(price >= 0)) e.price = 'Enter a price (0 or more)';
     if (!(weightKg > 0)) e.weightKg = 'Weight must be above 0';
@@ -122,6 +140,10 @@ export function ProductDialog({
       price,
       weightKg,
       reorderLevel,
+      safetyStock,
+      maxStock,
+      orderMultiple,
+      expiryDate: form.expiryDate,
       status: form.status,
       channelSkus,
     };
@@ -171,6 +193,18 @@ export function ProductDialog({
           </Field>
           <Field label="Reorder level (units)" error={errors.reorderLevel}>
             <Input type="number" min="0" step="1" value={form.reorderLevel} onChange={(e) => set('reorderLevel', e.target.value)} />
+          </Field>
+          <Field label="Safety stock (units)" hint="Buffer for demand swings" error={errors.safetyStock}>
+            <Input type="number" min="0" step="1" value={form.safetyStock} onChange={(e) => set('safetyStock', e.target.value)} />
+          </Field>
+          <Field label="Max stock (units)" hint="Reorders never go above this. 0 = no limit" error={errors.maxStock}>
+            <Input type="number" min="0" step="1" value={form.maxStock} onChange={(e) => set('maxStock', e.target.value)} />
+          </Field>
+          <Field label="Order in packs of" hint="Supplier carton size, 1 = any quantity" error={errors.orderMultiple}>
+            <Input type="number" min="1" step="1" value={form.orderMultiple} onChange={(e) => set('orderMultiple', e.target.value)} />
+          </Field>
+          <Field label="Expiry date (earliest batch)" hint="Leave empty if it doesn't expire">
+            <Input type="date" value={form.expiryDate} onChange={(e) => set('expiryDate', e.target.value)} />
           </Field>
           <Field label="Status">
             <SimpleSelect

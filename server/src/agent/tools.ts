@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { createSdkMcpServer, tool } from '@tencent-ai/agent-sdk';
 import * as ops from '../../../src/lib/ops.ts';
 import * as m from '../../../src/lib/metrics.ts';
+import { checkCompliance } from '../../../src/lib/compliance.ts';
 import type { AgentEvent, ApprovalRequest, BizPilotDB, ContentItem } from '../../../src/lib/db/types.ts';
 import { readSnapshot, withBusiness } from '../lib/workspace.ts';
 import { executeApproval } from '../lib/execute.ts';
@@ -12,6 +13,8 @@ import { getSkill, listSkills } from './skills.ts';
 import { syncMarketplace } from '../lib/sync.ts';
 import { PROVIDERS } from '../providers/index.ts';
 import { isConfigured, providerContext } from '../lib/integrations.ts';
+import { generateImage } from '../lib/media.ts';
+import { finishKlingVideo, klingConfigured, startKlingVideo } from '../lib/kling.ts';
 
 /**
  * BizPilot's tools, exposed to the WorkBuddy agent as an in-process MCP server.
@@ -28,8 +31,9 @@ const fail = (msg: string) => ({ content: [{ type: 'text' as const, text: `ERROR
 
 const productView = (p: BizPilotDB['products'][number]) => ({
   id: p.id, sku: p.sku, name: p.name, category: p.category, price: p.price, unitCost: p.unitCost,
-  onHand: p.stock, reserved: p.reserved, available: m.availableStock(p), incoming: p.incoming,
-  reorderLevel: p.reorderLevel, avgDailySales: p.avgDailySales,
+  onHand: p.stock, reserved: p.reserved, held: p.unavailable || 0, available: m.availableStock(p), incoming: p.incoming,
+  reorderLevel: p.reorderLevel, safetyStock: p.safetyStock, maxStock: p.maxStock, orderMultiple: p.orderMultiple,
+  expiryDate: p.expiryDate || null, avgDailySales: p.avgDailySales,
   daysLeft: Number.isFinite(m.daysOfStockLeft(p)) ? m.daysOfStockLeft(p) : null, status: p.status, supplierId: p.supplierId,
 });
 
@@ -117,8 +121,39 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         return ops.reorderSuggestions(db).map((s) => ({
           product: { id: s.product.id, sku: s.product.sku, name: s.product.name, unitCost: s.product.unitCost },
           supplier: s.supplier ? { id: s.supplier.id, name: s.supplier.name, leadTimeDays: s.supplier.leadTimeDays, minOrderQty: s.supplier.minOrderQty } : null,
-          available: s.available, daysLeft: s.daysLeft, suggestedQty: s.suggestedQty, reason: s.reason,
+          available: s.available, daysLeft: s.daysLeft, stockoutDate: s.stockoutDate, urgency: s.urgency, suggestedQty: s.suggestedQty, reason: s.reason,
         }));
+      })),
+
+    tool('get_inventory_health', 'Stock alerts (out of stock, low, expiring within 30 days, expired, no sales, slow-moving, held as damaged/quarantined) and stock valuation at cost and selling price.', {},
+      safe(async () => {
+        const db = await readSnapshot(businessId);
+        const v = m.stockValuation(db);
+        return {
+          alerts: m.inventoryAlerts(db).map((a) => ({ product: a.product.name, sku: a.product.sku, kind: a.kind, severity: a.severity, detail: a.detail })),
+          valuation: { units: v.units, atCost: r2(v.totalCost), atSellingPrice: r2(v.totalRetail), heldAtCost: r2(v.totalHeld) },
+        };
+      })),
+
+    tool('get_cash_flow', 'Money available now (capital + sales − expenses − placed POs), money expected in (unpaid invoices) and out (unpaid bills, repeating costs, POs waiting) over the next N days, the projected balance and a low-cash warning. Also lists products selling below cost or under the target margin.',
+      { days: z.number().int().positive().max(365).default(30) },
+      safe(async ({ days }) => {
+        const db = await readSnapshot(businessId);
+        const f = m.cashFlowForecast(db, days);
+        return {
+          ...f,
+          marginIssues: m.marginCheck(db).filter((x) => x.flag !== 'ok').map((x) => ({ product: x.product.name, price: x.product.price, unitCost: x.product.unitCost, marginPct: x.marginPct, flag: x.flag, priceForTarget: x.targetPrice })),
+          targetMarginPct: db.settings.targetMarginPct,
+        };
+      })),
+
+    tool('list_returns', 'Customer returns with reason, condition, what happened to the goods and refund status, plus return patterns (top reasons, most returned products).', {},
+      safe(async () => {
+        const db = await readSnapshot(businessId);
+        return {
+          returns: db.returns.slice(0, 50).map((r) => ({ ...r, product: db.products.find((p) => p.id === r.productId)?.name ?? null })),
+          patterns: m.returnStats(db),
+        };
       })),
 
     tool('sales_report', 'Sales for the last N days: totals by channel and source, top products with margin, and daily series.',
@@ -254,7 +289,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
 
     // ------------------------------------------------------------ write: master data
     tool('create_product', 'Add a new product to the catalogue (stock starts at openingStock).',
-      { name: z.string(), sku: z.string().optional(), category: z.string().optional(), description: z.string().max(6000).optional().describe('Listing copy: title, bullets, specs, keywords'), price: z.number().nonnegative(), unitCost: z.number().nonnegative(), reorderLevel: z.number().int().nonnegative().optional(), openingStock: z.number().int().nonnegative().optional(), supplier: z.string().optional().describe('Supplier id or name'), weightKg: z.number().positive().optional(), barcode: z.string().optional() },
+      { name: z.string(), sku: z.string().optional(), category: z.string().optional(), description: z.string().max(6000).optional().describe('Listing copy: title, bullets, specs, keywords'), price: z.number().nonnegative(), unitCost: z.number().nonnegative(), reorderLevel: z.number().int().nonnegative().optional(), safetyStock: z.number().int().nonnegative().optional(), maxStock: z.number().int().nonnegative().optional().describe('0 = no limit'), orderMultiple: z.number().int().positive().optional().describe('Supplier pack size'), expiryDate: z.string().optional().describe('YYYY-MM-DD of the earliest batch, empty if none'), openingStock: z.number().int().nonnegative().optional(), supplier: z.string().optional().describe('Supplier id or name'), weightKg: z.number().positive().optional(), barcode: z.string().optional() },
       write(async (a) => withBusiness(businessId, (db) => {
         const supplierId = a.supplier ? ops.findSupplier(db, a.supplier)?.id ?? null : null;
         const p = ops.createProduct(db, { ...a, supplierId }, ACTOR);
@@ -262,8 +297,8 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         return productView(p);
       }))),
 
-    tool('update_product', 'Edit product details (name, category, description/listing copy, reorder level, supplier, cost, weight, channel SKUs). Price changes must use request_price_change; stock changes must use record_stock_movement or request_stock_adjustment.',
-      { product: z.string(), name: z.string().optional(), category: z.string().optional(), description: z.string().max(6000).optional().describe('Listing copy: title, bullets, specs, keywords'), reorderLevel: z.number().int().nonnegative().optional(), unitCost: z.number().nonnegative().optional(), weightKg: z.number().positive().optional(), supplier: z.string().optional(), channelSkus: z.record(z.string(), z.string()).optional() },
+    tool('update_product', 'Edit product details (name, category, description/listing copy, reorder level, safety stock, max stock, pack size, expiry date, supplier, cost, weight, channel SKUs). Price changes must use request_price_change; stock changes must use record_stock_movement or request_stock_adjustment.',
+      { product: z.string(), name: z.string().optional(), category: z.string().optional(), description: z.string().max(6000).optional().describe('Listing copy: title, bullets, specs, keywords'), reorderLevel: z.number().int().nonnegative().optional(), safetyStock: z.number().int().nonnegative().optional(), maxStock: z.number().int().nonnegative().optional().describe('0 = no limit'), orderMultiple: z.number().int().positive().optional().describe('Supplier pack size'), expiryDate: z.string().optional().describe('YYYY-MM-DD of the earliest batch, empty if none'), unitCost: z.number().nonnegative().optional(), weightKg: z.number().positive().optional(), supplier: z.string().optional(), channelSkus: z.record(z.string(), z.string()).optional() },
       write(async ({ product, supplier, ...patch }) => withBusiness(businessId, (db) => {
         const p = ops.requireProduct(db, product);
         const extra = supplier ? { supplierId: ops.findSupplier(db, supplier)?.id ?? null } : {};
@@ -279,6 +314,33 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       }))),
 
     // ------------------------------------------------------------ write: purchasing & stock
+    tool('hold_stock', 'Mark units on hand as not sellable (damaged, expired or quarantined). Sets the total held quantity for the product; 0 releases it. Held stock is excluded from available-to-sell.',
+      { product: z.string(), heldQuantity: z.number().int().nonnegative(), reason: z.string() },
+      write(async ({ product, heldQuantity, reason }) => withBusiness(businessId, (db) => productView(ops.setHeldStock(db, ops.requireProduct(db, product).id, heldQuantity, reason, ACTOR))))),
+
+    tool('record_return', 'Record a customer return (reason, condition). Then use resolve_return to decide what happens to the goods and any refund.',
+      {
+        product: z.string(),
+        quantity: z.number().int().positive(),
+        reason: z.enum(['damaged', 'defective', 'wrong_item', 'not_as_described', 'changed_mind', 'expired', 'other']),
+        condition: z.enum(['unopened', 'opened', 'damaged', 'defective']),
+        order: z.string().optional().describe('Order id or order number'),
+        customerName: z.string().optional(),
+        notes: z.string().optional(),
+      },
+      write(async (a) => withBusiness(businessId, (db) => {
+        const r = ops.createReturn(db, { productId: ops.requireProduct(db, a.product).id, orderId: a.order ?? null, quantity: a.quantity, reason: a.reason, condition: a.condition, customerName: a.customerName, notes: a.notes }, ACTOR);
+        emit({ kind: 'artifact', text: `Return recorded: ${r.returnNumber}` });
+        return r;
+      }))),
+
+    tool('resolve_return', 'Close a return: restock (back to sellable stock), quarantine (held), dispose or supplier_return. A refund above 0 goes to the owner for approval.',
+      { returnId: z.string().describe('Return id or number, e.g. RET-00001'), resolution: z.enum(['restock', 'quarantine', 'dispose', 'supplier_return']), refundAmount: z.number().nonnegative().default(0) },
+      write(async ({ returnId, resolution, refundAmount }) => {
+        const out = await withBusiness(businessId, (db) => ops.resolveReturn(db, returnId, resolution, refundAmount, ACTOR));
+        return out.approval ? { returnNumber: out.ret.returnNumber, ...(await afterApproval(out.approval)) } : { returnNumber: out.ret.returnNumber, status: 'resolved' };
+      })),
+
     tool('draft_purchase_order', 'Create a draft purchase order and send it to the owner for approval. Unit cost defaults to the product cost. Fails if the business does not have the cash: then order less (fit get_business_overview cash.balance) or tell the owner.',
       { supplier: z.string(), lines: z.array(z.object({ product: z.string(), quantity: z.number().int().positive(), unitCost: z.number().nonnegative().optional() })).min(1), note: z.string().optional(), expectedDate: z.string().optional() },
       write(async ({ supplier, lines, note, expectedDate }) => {
@@ -460,16 +522,94 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       { title: z.string(), platform: z.enum(['Facebook', 'Instagram', 'TikTok', 'YouTube', 'LinkedIn']), type: z.enum(['post', 'carousel', 'video_script', 'ad']), body: z.string(), imageUrl: z.string().optional(), scheduledDate: z.string().describe('ISO date-time'), requestPublish: z.boolean().default(false) },
       write(async ({ requestPublish, ...c }) => {
         const out = await withBusiness(businessId, (db) => {
-          const banned = db.settings.prohibitedClaims.split(/[,\n]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-          const hit = banned.find((w) => c.body.toLowerCase().includes(w));
-          if (hit) throw new ops.OpError(`The draft contains a prohibited claim: "${hit}". Rewrite it.`);
+          const issues = checkCompliance(`${c.title}\n${c.body}`, db);
+          const blocks = issues.filter((i) => i.level === 'block');
+          if (blocks.length) throw new ops.OpError(`Compliance check failed, rewrite the draft: ${blocks.map((i) => `${i.rule} ("${i.match}")`).join('; ')}.`);
           const item: ContentItem = ops.addContentItem(db, { ...c, imageUrl: c.imageUrl ?? '', campaignId: null }, ACTOR);
           emit({ kind: 'artifact', text: `Content draft: ${item.platform} ${item.title}` });
           if (!requestPublish) return { contentId: item.id, req: null };
           item.status = 'in_review';
           return { contentId: item.id, req: ops.requestApproval(db, { type: 'marketing_publish', title: `Publish "${item.title}" on ${item.platform}`, description: item.body.slice(0, 400), payload: { contentId: item.id } }, ACTOR) };
         });
-        return out.req ? { contentId: out.contentId, ...(await afterApproval(out.req)) } : { contentId: out.contentId, status: 'draft' };
+        const warnings = checkCompliance(`${c.title}\n${c.body}`, await readSnapshot(businessId)).map((i) => `${i.rule}: "${i.match}"`);
+        return out.req ? { contentId: out.contentId, complianceWarnings: warnings, ...(await afterApproval(out.req)) } : { contentId: out.contentId, status: 'draft', complianceWarnings: warnings };
+      })),
+
+    tool('check_content_compliance', 'Check marketing text against the owner\'s prohibited claims and Malaysian advertising rules (guarantees, medical/safety claims, superlatives, pressure tactics, prices not matching products). Run before drafting final copy.',
+      { text: z.string() },
+      safe(async ({ text }) => {
+        const issues = checkCompliance(text, await readSnapshot(businessId));
+        return issues.length ? { passed: !issues.some((i) => i.level === 'block'), issues } : { passed: true, issues: [] };
+      })),
+
+    tool('generate_image', 'Generate a real AI image (product shot, poster, social post visual, thumbnail) from a detailed English prompt. Returns a public image URL. Optionally attach it to a content draft. Put the image in your reply as ![short title](url) so the owner sees it.',
+      {
+        prompt: z.string().describe('Detailed visual description: subject, setting, style, lighting, colours, camera angle. Describe the product exactly; never add text, logos or prices to the image.'),
+        aspect: z.enum(['1:1', '4:5', '9:16', '16:9']).default('1:1').describe('1:1 or 4:5 for feed posts, 9:16 for TikTok/Reels/Stories, 16:9 for YouTube'),
+        contentId: z.string().optional().describe('Content draft to attach the image to'),
+      },
+      safe(async ({ prompt, aspect, contentId }) => {
+        emit({ kind: 'status', text: 'Generating image…' });
+        const img = await generateImage(businessId, prompt, aspect);
+        if (contentId) {
+          await withBusiness(businessId, (db) => {
+            const c = db.contentItems.find((x) => x.id === contentId);
+            if (!c) throw new ops.OpError('Content draft not found.');
+            c.imageUrl = img.url;
+            ops.audit(db, ACTOR, 'update', 'content', c.id, `AI image attached to ${c.title}`);
+          });
+        }
+        emit({ kind: 'artifact', text: `Image generated${contentId ? ' and attached to the draft' : ''}`, data: { media: 'image', url: img.url, contentId: contentId ?? null } });
+        return { url: img.url, markdown: `![Generated image](${img.url})`, attachedTo: contentId ?? null };
+      })),
+
+    tool('make_video', 'Make a real short promo video (TikTok, Reels, Shorts). With Kling AI set up it generates a real motion video; otherwise it generates one AI image per scene and the owner\'s app renders them into an animated video with captions. Either way the video is saved on the content draft. Use 3 to 6 scenes. Creates a video draft if contentId is not given.',
+      {
+        title: z.string(),
+        platform: z.enum(['TikTok', 'Instagram', 'YouTube', 'Facebook', 'LinkedIn']).default('TikTok'),
+        aspect: z.enum(['9:16', '1:1', '16:9']).default('9:16'),
+        scenes: z.array(z.object({
+          caption: z.string().max(90).describe('Short on-screen text for this scene (what viewers read)'),
+          imagePrompt: z.string().describe('Detailed visual description for this scene, no text in the image'),
+          seconds: z.number().min(1.5).max(6).default(3),
+        })).min(2).max(6),
+        contentId: z.string().optional().describe('Existing video draft to attach the video to'),
+        scheduledDate: z.string().optional().describe('ISO date-time, for a new draft'),
+      },
+      write(async ({ title, platform, aspect, scenes, contentId, scheduledDate }) => {
+        const ensureDraft = (firstImage: string) => withBusiness(businessId, (db) => {
+          let c = contentId ? db.contentItems.find((x) => x.id === contentId) : undefined;
+          if (contentId && !c) throw new ops.OpError('Content draft not found.');
+          if (!c) {
+            const body = scenes.map((r, i) => `Scene ${i + 1} (${r.seconds ?? 3}s): ${r.caption}`).join('\n');
+            c = ops.addContentItem(db, { title, platform, type: 'video_script', body, imageUrl: firstImage, scheduledDate: scheduledDate ?? new Date(Date.now() + 86_400_000).toISOString(), campaignId: null }, ACTOR);
+          }
+          return c.id;
+        });
+        if (klingConfigured()) {
+          // Real motion video from Kling AI; finishes in the background.
+          try {
+            const total = scenes.reduce((n, sc) => n + (sc.seconds ?? 3), 0);
+            const shape = aspect === '9:16' ? 'Vertical' : aspect === '1:1' ? 'Square' : 'Widescreen';
+            const prompt = `${shape} promotional video for social media. ${scenes.map((sc, i) => `Shot ${i + 1}: ${sc.imagePrompt}`).join(' ')} Smooth camera movement, bright commercial lighting, no on-screen text.`;
+            const taskId = await startKlingVideo(prompt, aspect, total > 7 ? 10 : 5);
+            const id = await ensureDraft('');
+            void finishKlingVideo(businessId, taskId, id, title).catch((e) => console.error('[kling]', e));
+            emit({ kind: 'artifact', text: `Kling AI is making the video: ${title}`, data: { media: 'video', engine: 'kling', contentId: id, title, aspect, scenes: [] } });
+            return { contentId: id, status: 'Kling AI is generating the video (usually 2 to 6 minutes). It is saved on the draft automatically and the owner gets a notification. Tell the owner it will appear below this message and in Marketing Studio → Post & video drafts.' };
+          } catch (e) {
+            emit({ kind: 'status', text: `${(e as Error).message} Making a slideshow video instead.` });
+          }
+        }
+        const rendered: { caption: string; imageUrl: string; seconds: number }[] = [];
+        for (const [i, sc] of scenes.entries()) {
+          emit({ kind: 'status', text: `Generating scene ${i + 1} of ${scenes.length}…` });
+          const img = await generateImage(businessId, sc.imagePrompt, aspect === '16:9' ? '16:9' : aspect === '1:1' ? '1:1' : '9:16');
+          rendered.push({ caption: sc.caption, imageUrl: img.url, seconds: sc.seconds ?? 3 });
+        }
+        const id = await ensureDraft(rendered[0].imageUrl);
+        emit({ kind: 'artifact', text: `Video ready to render: ${title}`, data: { media: 'video', contentId: id, title, aspect, scenes: rendered } });
+        return { contentId: id, scenes: rendered.length, status: 'The video is rendering in the owner\'s Command Centre and will be saved on the draft automatically. Tell the owner it appears below this message with a download button.' };
       })),
 
     tool('create_campaign', 'Create a draft ad campaign plan with budget and daily cap.',

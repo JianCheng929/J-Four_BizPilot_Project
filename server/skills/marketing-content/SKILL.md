@@ -1,6 +1,6 @@
 ---
 name: marketing-content
-description: Use for any marketing work: planning a week or month of posts, captions, hashtags, carousels, promotional videos (scripts, storyboards, shot lists), ads and campaigns, or reviewing marketing results and what to change.
+description: Use for one-off marketing requests (a single post or idea from New content, a carousel, a promo video, an ad, or a review of marketing results). For the weekly cycle ('run this week's marketing', 'plan next week') use bizpilot-marketing instead.
 ---
 
 # marketing-content: plan, create and measure marketing (Marketing Studio)
@@ -68,8 +68,17 @@ Use type `video_script` with this body:
 - **Music mood**, 3 **title** options and a **thumbnail** idea.
 - **Variants:** 9:16 for TikTok/Reels and 1:1 for the feed.
 
-BizPilot cannot render video. Say that the script is ready to film or to hand to an
-editor or a tool such as CapCut.
+Then make the real video: call `make_video` with the draft's `contentId` and 3–6 scenes
+(a short caption and a detailed image prompt each, 2–4 s per scene, 9:16 for
+TikTok/Reels). The video renders in the owner's Command Centre and is saved on the draft.
+Tell them it is a slideshow-style video made from AI images; for real footage they can
+film the script.
+
+## Images
+
+For every post, carousel or ad, call `generate_image` with the draft's `contentId` and a
+detailed prompt (subject, setting, style, lighting, colours). No text, logos or prices
+in the image. Show it in your reply as `![title](url)`.
 
 ## 6. Campaigns and ads (C4)
 

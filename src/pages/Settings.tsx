@@ -180,6 +180,9 @@ function ProfileForm() {
           <F label="Starting capital / modal (RM)" hint={`e.g. 1000. BizPilot manages your money from here: sales add to it, expenses and purchase orders take from it, and orders bigger than the money left are blocked.${s.openingCashDate ? ` Last set ${new Date(s.openingCashDate).toLocaleDateString()}.` : ''}`}>
             <Input type="number" min={0} step="0.01" value={String(s.openingCash ?? 0)} onChange={(e) => setS((x) => ({ ...x, openingCash: Number(e.target.value), openingCashDate: new Date().toISOString() }))} />
           </F>
+          <F label="Target gross margin (%)" hint="Products below this margin are flagged in Finance → Pricing. Also the default in the pricing calculator.">
+            <Input type="number" min={1} max={90} step="1" value={String(s.targetMarginPct ?? 30)} onChange={(e) => setS((x) => ({ ...x, targetMarginPct: Number(e.target.value) }))} />
+          </F>
         </CardContent>
       </Card>
 

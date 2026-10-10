@@ -71,8 +71,13 @@ create table if not exists products (
   weight_kg numeric(8,3) default 0.5,
   stock int default 0,
   reserved int default 0,
+  unavailable int default 0,
   incoming int default 0,
   reorder_level int default 0,
+  safety_stock int default 0,
+  max_stock int default 0,
+  order_multiple int default 1,
+  expiry_date text default '',
   avg_daily_sales numeric(10,3) default 0,
   status text default 'active' check (status in ('active','discontinued','seasonal','draft')),
   channel_skus jsonb default '{}'::jsonb,
@@ -352,13 +357,42 @@ drop policy if exists "own business" on businesses;
 create policy "own business" on businesses
   for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
+-- Inventory policy, held stock, expiry and returns (also in team-features.sql) ---------
+alter table products add column if not exists unavailable int default 0;
+alter table products add column if not exists safety_stock int default 0;
+alter table products add column if not exists max_stock int default 0;
+alter table products add column if not exists order_multiple int default 1;
+alter table products add column if not exists expiry_date text default '';
+
+create table if not exists return_cases (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  return_number text not null,
+  order_id text,
+  product_id text,
+  customer_name text default '',
+  quantity int default 1,
+  reason text default 'other',
+  condition text default 'opened',
+  notes text default '',
+  photo_url text default '',
+  status text default 'open' check (status in ('open','resolved','rejected')),
+  resolution text,
+  refund_amount numeric(12,2) default 0,
+  refund_status text default 'none' check (refund_status in ('none','pending_approval','refunded')),
+  created_at timestamptz default now(),
+  resolved_at timestamptz,
+  unique (business_id, return_number)
+);
+
+
 do $$
 declare t text;
 begin
   foreach t in array array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks'
+    'audit_log','notifications','agent_tasks','return_cases'
   ]
   loop
     execute format('alter table %I enable row level security', t);

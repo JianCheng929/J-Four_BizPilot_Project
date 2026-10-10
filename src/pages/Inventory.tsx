@@ -590,7 +590,7 @@ export function Inventory() {
                               {s.urgency === 'stockout_risk' ? 'Stockout risk' : s.urgency === 'reorder_now' ? 'Reorder now' : 'Watch'}
                             </Pill>
                           </TableCell>
-                          <TableCell className="max-w-xs text-xs text-slate-500">{s.reason}</TableCell>
+                          <TableCell className="min-w-48 whitespace-normal break-words max-w-xs text-xs text-slate-500">{s.reason}</TableCell>
                           <TableCell className="text-right">
                             <Input
                               type="number"

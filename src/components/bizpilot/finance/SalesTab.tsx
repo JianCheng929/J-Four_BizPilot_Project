@@ -157,7 +157,7 @@ export function SalesTab({ onOpenInvoice }: { onOpenInvoice: (invoiceId: string)
                         <SourceBadge source={o.source} />
                       </TableCell>
                       <TableCell className="text-sm">{o.customerName || '—'}</TableCell>
-                      <TableCell className="max-w-56 text-xs text-slate-600">
+                      <TableCell className="min-w-48 whitespace-normal break-words max-w-56 text-xs text-slate-600">
                         {o.lines.map((l) => `${l.quantity} × ${l.name ?? l.sku ?? 'item'}${l.productId ? '' : ' (unmatched)'}`).join(', ')}
                       </TableCell>
                       <TableCell className="text-right font-medium">{money(o.total)}</TableCell>

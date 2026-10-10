@@ -1,11 +1,13 @@
 import * as ops from '../../../src/lib/ops.ts';
 import type { SalesSource } from '../../../src/lib/db/types.ts';
+import type { ExternalOrder, ExternalReview } from '../providers/types.ts';
 import { getProvider } from '../providers/index.ts';
 import { HttpError } from './http.ts';
 import { getIntegrationRow, isConfigured, providerContext, upsertIntegration } from './integrations.ts';
 import { withBusiness } from './workspace.ts';
 
-const LABEL: Record<string, string> = { shopee: 'Shopee', lazada: 'Lazada', tiktok_shop: 'TikTok Shop' };
+const LABEL: Record<string, string> = { shopee: 'Shopee', lazada: 'Lazada', tiktok_shop: 'TikTok Shop', website: 'Own website' };
+const PREFIX: Record<string, string> = { shopee: 'SP', lazada: 'LZ', tiktok_shop: 'TT', website: 'WEB' };
 
 export interface SyncResult {
   orders: { imported: number; updated: number; unmatchedItems: number };
@@ -33,9 +35,32 @@ export async function syncMarketplace(businessId: string, providerId: string, ac
   try {
     const orders = await provider.fetchOrders(pctx, since);
     const reviews = provider.fetchReviews ? await provider.fetchReviews(pctx, since) : null;
-    const source = providerId as SalesSource;
+    const result = await importOrders(businessId, providerId, orders, reviews, actor);
 
-    const result = await withBusiness(businessId, (db) => {
+    await upsertIntegration(businessId, provider.id, { last_sync_at: startedAt.toISOString(), status: 'connected', error: null });
+    return {
+      orders: { imported: result.imported, updated: result.updated, unmatchedItems: result.unmatchedItems },
+      ...(reviews ? { reviews: { imported: result.reviewsImported } } : {}),
+      message: `${LABEL[providerId]}: ${result.imported} new orders, ${result.updated} updated${reviews ? `, ${result.reviewsImported} new reviews` : ''}.`,
+    };
+  } catch (e) {
+    await upsertIntegration(businessId, provider.id, { status: 'error', error: (e as Error).message }).catch(() => undefined);
+    throw e;
+  }
+}
+
+/**
+ * Brings outside orders into BizPilot once each (matched by source + external id); later
+ * calls only apply cancellations, shipping and payment changes. Used by marketplace sync
+ * and by the agent when it reads the owner's own website.
+ */
+export function importOrders(
+  businessId: string, providerId: string, orders: ExternalOrder[], reviews: ExternalReview[] | null, actor: string,
+  /** Past orders whose stock the source already took off (its stock numbers are copied as they are): shipped ones are booked without moving stock again. */
+  stockAlreadyCounted = false,
+) {
+    const source = providerId as SalesSource;
+    return withBusiness(businessId, (db) => {
       let imported = 0, updated = 0, unmatchedItems = 0, reviewsImported = 0;
       const tryFulfil = (id: string) => {
         try { ops.fulfilSalesOrder(db, id, actor); } catch (e) {
@@ -56,7 +81,7 @@ export async function syncMarketplace(businessId: string, providerId: string, ac
             channel: 'online',
             source,
             externalId: o.externalId,
-            orderNumber: `${providerId === 'tiktok_shop' ? 'TT' : providerId === 'shopee' ? 'SP' : 'LZ'}-${o.orderNumber}`,
+            orderNumber: `${PREFIX[providerId] ?? 'EXT'}-${o.orderNumber}`,
             customerName: o.customerName,
             customerPhone: o.customerPhone,
             shippingAddress: o.shippingAddress,
@@ -68,7 +93,13 @@ export async function syncMarketplace(businessId: string, providerId: string, ac
           }, actor);
           // Keep the marketplace total (it includes shipping/vouchers)
           if (o.total > 0) so.total = Math.round(o.total * 100) / 100;
-          if (o.shipped) tryFulfil(so.id);
+          if (o.shipped && stockAlreadyCounted) {
+            for (const l of so.lines) {
+              const p = l.productId ? db.products.find((x) => x.id === l.productId) : undefined;
+              if (p) p.reserved = Math.max(0, p.reserved - l.quantity);
+            }
+            so.status = 'fulfilled';
+          } else if (o.shipped) tryFulfil(so.id);
           imported++;
         } else {
           let changed = false;
@@ -102,15 +133,4 @@ export async function syncMarketplace(businessId: string, providerId: string, ac
       ops.audit(db, actor, 'sync', 'integration', providerId, `Imported ${imported}, updated ${updated} orders; ${reviewsImported} reviews`);
       return { imported, updated, unmatchedItems, reviewsImported };
     });
-
-    await upsertIntegration(businessId, provider.id, { last_sync_at: startedAt.toISOString(), status: 'connected', error: null });
-    return {
-      orders: { imported: result.imported, updated: result.updated, unmatchedItems: result.unmatchedItems },
-      ...(reviews ? { reviews: { imported: result.reviewsImported } } : {}),
-      message: `${LABEL[providerId]}: ${result.imported} new orders, ${result.updated} updated${reviews ? `, ${result.reviewsImported} new reviews` : ''}.`,
-    };
-  } catch (e) {
-    await upsertIntegration(businessId, provider.id, { status: 'error', error: (e as Error).message }).catch(() => undefined);
-    throw e;
-  }
 }

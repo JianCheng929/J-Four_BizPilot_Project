@@ -5,6 +5,8 @@ import { handle, HttpError, contextFor } from '../lib/http.ts';
 import { getIntegrationRow, isConfigured, providerContext, upsertIntegration, serverUrl } from '../lib/integrations.ts';
 import { PROVIDERS } from '../providers/index.ts';
 import { supabaseAdmin } from '../lib/supabase.ts';
+import { WEBSITE_IMPORT_PROMPT } from '../providers/website.ts';
+import { isBusinessBusy, startTask } from '../agent/runner.ts';
 
 export const integrations = Router();
 
@@ -114,7 +116,25 @@ integrations.post(
       error: result.ok ? null : result.message,
       ...(result.account ? { account: result.account } : {}),
     });
+    // Own website: the first good test starts the agent reading it, no extra click.
+    if (provider.id === 'website' && result.ok && !(await getIntegrationRow(businessId, 'website'))?.last_sync_at && !isBusinessBusy(businessId)) {
+      const task = await startTask(businessId, WEBSITE_IMPORT_PROMPT, null).catch(() => null);
+      if (task) return { ...result, message: `${result.message} BizPilot is now reading your site and filling everything in.`, taskId: task.id };
+    }
     return result;
+  }),
+);
+
+/** Own website: read the site again and bring in what's new. */
+integrations.post(
+  '/website/import',
+  requireUser,
+  requireRole('manager'),
+  handle(async (req) => {
+    const businessId = ctx(req).business.id;
+    if (!(await getIntegrationRow(businessId, 'website'))?.credentials?.SITE_URL) throw new HttpError(400, 'Save your website address first.');
+    if (isBusinessBusy(businessId)) throw new HttpError(409, 'BizPilot is still working on another goal. Try again when it finishes.');
+    return startTask(businessId, WEBSITE_IMPORT_PROMPT, null);
   }),
 );
 

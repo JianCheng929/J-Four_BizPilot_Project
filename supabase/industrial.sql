@@ -17,6 +17,7 @@
 --   8. Product variants and batch / expiry tracking.
 --   9. Warehouse bins, pick and pack, staff tasks; receipts and branch costs; PDPA consent records and backups.
 --  10. One login can own or join several businesses and switch between them; profile photos.
+--  11. Orders imported from the owner's own website.
 -- ============================================================
 
 -- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
@@ -65,6 +66,9 @@ alter table products add column if not exists location_stock jsonb default '{}':
 alter table stock_movements add column if not exists location_id text;
 alter table stock_movements add column if not exists to_location_id text;
 alter table sales_orders add column if not exists location_id text;
+-- Orders read from the owner's own website (Settings → Integrations → Your own website)
+alter table sales_orders drop constraint if exists sales_orders_source_check;
+alter table sales_orders add constraint sales_orders_source_check check (source in ('manual','pos','shopee','lazada','tiktok_shop','website'));
 alter table purchase_orders add column if not exists location_id text;
 alter table stock_movements drop constraint if exists stock_movements_type_check;
 alter table stock_movements add constraint stock_movements_type_check check (type in ('in','out','adjustment','transfer'));

@@ -138,7 +138,7 @@ create table if not exists sales_orders (
   business_id uuid not null references businesses (id) on delete cascade,
   order_number text not null,
   channel text default 'online' check (channel in ('online','retail')),
-  source text default 'manual' check (source in ('manual','pos','shopee','lazada','tiktok_shop')),
+  source text default 'manual' check (source in ('manual','pos','shopee','lazada','tiktok_shop','website')),
   external_id text,
   customer_name text default '',
   customer_email text default '',

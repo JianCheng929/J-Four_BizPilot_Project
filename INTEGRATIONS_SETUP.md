@@ -31,6 +31,16 @@ If you have the WorkBuddy desktop app you can point `CODEBUDDY_CODE_PATH` at its
 1. https://partner.tiktokshop.com → create a custom app → **App Key**, **App Secret**, **Service ID**. Set the app's redirect URL to the callback URL shown in BizPilot.
 2. Enter them → **Connect TikTok Shop** → authorise the shop.
 
+## Your own website
+
+For a shop site the business already runs (self-hosted, WooCommerce, Shopify or custom). No developer app is needed.
+
+1. Settings → Integrations → **Your own website**: enter the site address (and an API key only if the site's data needs one), then **Save**.
+2. Click **Test connection**. BizPilot looks over the site and lists the data it found (for example `/api/products`, `/api/stock`, `/api/orders`).
+3. The first successful test starts BizPilot's agent by itself. It reads the site and fills in products, opening stock, prices, suppliers, orders and delivery options, without double counting. **Import again** re-reads it any time, and the daily autopilot keeps it in step.
+
+BizPilot only reads public addresses on the saved site, never local or private ones. Text read from the site is treated as data, not instructions. Price changes to products that already exist still wait in Approvals.
+
 ## EasyParcel (courier rates, booking, tracking)
 1. https://easyparcel.com/my → Integrations → API → copy the **API key**. Top up the wallet; bookings are paid from it.
 2. Set your **ship-from postcode** in Settings → Business profile.

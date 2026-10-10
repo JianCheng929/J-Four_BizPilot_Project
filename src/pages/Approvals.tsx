@@ -279,12 +279,12 @@ export function Approvals() {
                         {a.decidedBy && <div className="text-slate-400">{a.decidedBy}</div>}
                       </TableCell>
                       <TableCell className="text-xs">{TYPE_LABEL[a.type] ?? a.type}</TableCell>
-                      <TableCell className="max-w-80 text-sm">{a.title}</TableCell>
+                      <TableCell className="min-w-48 whitespace-normal break-words max-w-80 text-sm">{a.title}</TableCell>
                       <TableCell className="text-right text-sm">{a.amount ? money(a.amount) : '—'}</TableCell>
                       <TableCell>
                         <StatusPill status={a.status} />
                       </TableCell>
-                      <TableCell className="max-w-72 text-xs">
+                      <TableCell className="min-w-48 whitespace-normal break-words max-w-72 text-xs">
                         {a.status === 'approved' ? (
                           <>
                             <StatusPill status={a.executionStatus ?? 'not_started'} label={(a.executionStatus ?? 'not started').replace('_', ' ')} />

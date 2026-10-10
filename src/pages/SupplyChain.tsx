@@ -189,14 +189,12 @@ export function SupplyChain() {
                         <TableRow key={po.id} className={cn(isLate && 'bg-amber-50/70')}>
                           <TableCell className="font-medium">{po.poNumber}</TableCell>
                           <TableCell>{supplierName(po.supplierId)}</TableCell>
-                          <TableCell className="max-w-64 text-xs text-slate-600">
-                            {po.lines
-                              .map((l) => {
-                                const p = db.products.find((x) => x.id === l.productId);
-                                const rec = l.receivedQty ? ` (${l.receivedQty} recv)` : '';
-                                return `${l.quantity} × ${p?.name ?? 'item'}${rec}`;
-                              })
-                              .join(', ')}
+                          <TableCell className="min-w-48 whitespace-normal break-words max-w-60 space-y-0.5 text-xs text-slate-600">
+                            {po.lines.map((l, i) => {
+                              const p = db.products.find((x) => x.id === l.productId);
+                              const rec = l.receivedQty ? ` (${l.receivedQty} recv)` : '';
+                              return <div key={i}>{`${l.quantity} × ${p?.name ?? 'item'}${rec}`}</div>;
+                            })}
                           </TableCell>
                           <TableCell className="text-right">{money(po.totalCost)}</TableCell>
                           <TableCell className="whitespace-nowrap text-xs">{fmtDate(po.createdAt)}</TableCell>
@@ -226,8 +224,8 @@ export function SupplyChain() {
                                 </Button>
                               )}
                               {(po.status === 'ordered' || po.status === 'partially_received') && (
-                                <Button size="sm" className={primaryBtn} onClick={() => setReceiving(po)}>
-                                  <PackageCheck className="mr-1 h-3.5 w-3.5" /> Receive goods
+                                <Button size="sm" className={primaryBtn} title="Receive goods" onClick={() => setReceiving(po)}>
+                                  <PackageCheck className="mr-1 h-3.5 w-3.5" /> Receive
                                 </Button>
                               )}
                               {!['received', 'cancelled'].includes(po.status) && (

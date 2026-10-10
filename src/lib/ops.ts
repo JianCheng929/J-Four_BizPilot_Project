@@ -1593,7 +1593,7 @@ export function updateCampaign(db: BizPilotDB, id: string, patch: CampaignPatch,
 }
 
 /** Business settings the agent may change. Automation level, approval limit and capital stay with the owner. */
-export const AGENT_SETTINGS = ['brandVoice', 'targetAudience', 'prohibitedClaims', 'brandDifferentiators', 'brandStyle', 'brandLanguages', 'brandCompetitors', 'targetMarginPct', 'lowStockThresholdDays', 'shipFromPostcode', 'msicCode', 'msicDescription', 'addressLine', 'city', 'postcode', 'phone', 'email'] as const;
+export const AGENT_SETTINGS = ['brandVoice', 'targetAudience', 'prohibitedClaims', 'brandDifferentiators', 'brandStyle', 'brandLanguages', 'brandCompetitors', 'targetMarginPct', 'lowStockThresholdDays', 'shipFromPostcode', 'msicCode', 'msicDescription', 'addressLine', 'city', 'postcode', 'phone', 'email', 'deliveryInfo'] as const;
 export type AgentSettingsPatch = Partial<Pick<BizPilotDB['settings'], (typeof AGENT_SETTINGS)[number]>>;
 
 export function updateBusinessSettings(db: BizPilotDB, patch: AgentSettingsPatch, actor: string) {

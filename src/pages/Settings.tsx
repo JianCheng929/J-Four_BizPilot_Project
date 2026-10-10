@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import { DataExportCard, TeamCard } from '@/components/bizpilot/TeamCard';
 import { TwoStepCard } from '@/components/bizpilot/TwoStep';
 import { BackupsCard } from '@/components/bizpilot/BackupsCard';
+import { openAgentChat } from '@/components/bizpilot/agentChat';
 
 // ---------------------------------------------------------------- types from the server
 
@@ -323,9 +324,10 @@ function IntegrationCard({ item, onChange }: { item: Integration; onChange: () =
           ) : null}
           <Button size="sm" variant={item.oauth ? 'outline' : 'default'} className={item.oauth ? '' : 'bg-teal-700 text-white hover:bg-teal-800'} disabled={!!busy} onClick={() => doing('test', async () => {
             await save();
-            const r = await post<{ ok: boolean; message: string }>(`/api/integrations/${item.id}/test`);
+            const r = await post<{ ok: boolean; message: string; taskId?: string }>(`/api/integrations/${item.id}/test`);
             setResult(r);
             await onChange();
+            if (r.taskId) { await reload(); openAgentChat(r.taskId); } // own website: the agent starts reading it
           })}>
             {busy === 'test' && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}Test connection
           </Button>
@@ -336,6 +338,15 @@ function IntegrationCard({ item, onChange }: { item: Integration; onChange: () =
               await Promise.all([onChange(), reload()]);
             })}>
               {busy === 'sync' ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}Sync now
+            </Button>
+          )}
+          {item.id === 'website' && item.connected && (
+            <Button size="sm" variant="outline" disabled={!!busy} title="BizPilot reads your site again and brings in what's new" onClick={() => doing('import', async () => {
+              const t = await post<{ id: string }>('/api/integrations/website/import');
+              await reload();
+              openAgentChat(t.id);
+            })}>
+              {busy === 'import' ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}Import again
             </Button>
           )}
           {(item.configured || item.connected) && (

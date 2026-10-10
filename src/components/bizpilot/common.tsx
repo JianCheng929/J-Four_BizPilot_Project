@@ -241,6 +241,7 @@ export const SOURCE_LABEL: Record<SalesSource, string> = {
   shopee: 'Shopee',
   lazada: 'Lazada',
   tiktok_shop: 'TikTok Shop',
+  website: 'Own website',
 };
 
 const SOURCE_CLS: Record<SalesSource, string> = {
@@ -249,6 +250,7 @@ const SOURCE_CLS: Record<SalesSource, string> = {
   shopee: 'bg-orange-100 text-orange-700',
   lazada: 'bg-indigo-100 text-indigo-700',
   tiktok_shop: 'bg-zinc-800 text-white',
+  website: 'bg-teal-100 text-teal-800',
 };
 
 export function SourceBadge({ source }: { source: SalesSource }) {

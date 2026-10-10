@@ -120,7 +120,7 @@ export function ProductionTab() {
                       {o.quantity}× {name(o.productId)}
                       {o.status === 'completed' && <div className="text-xs text-slate-500">{o.goodQty} good{o.rejectedQty ? `, ${o.rejectedQty} rejected` : ''} · batch {o.batchNumber}</div>}
                     </TableCell>
-                    <TableCell className="max-w-xs text-xs">
+                    <TableCell className="min-w-48 whitespace-normal break-words max-w-xs text-xs">
                       {open ? (
                         short.length ? <span className="text-red-600">Short: {short.join(', ')}</span> : <span className="text-teal-700">All in stock</span>
                       ) : (
@@ -175,7 +175,7 @@ export function ProductionTab() {
                 return (
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.name}<div className="text-xs text-slate-400">{p.stock} in stock</div></TableCell>
-                    <TableCell className="max-w-sm text-xs text-slate-600">{p.bom!.map((l) => `${l.quantity} ${name(l.productId)}`).join(', ')}</TableCell>
+                    <TableCell className="min-w-48 whitespace-normal break-words max-w-sm text-xs text-slate-600">{p.bom!.map((l) => `${l.quantity} ${name(l.productId)}`).join(', ')}</TableCell>
                     <TableCell className="text-right tabular-nums">{money(unit)}</TableCell>
                     <TableCell className="text-right">{margin === null ? '—' : <Pill tone={margin < 0 ? 'red' : margin < 0.2 ? 'amber' : 'green'}>{Math.round(margin * 100)}%</Pill>}</TableCell>
                     <TableCell className="text-right tabular-nums">{canMake(db, p)}</TableCell>

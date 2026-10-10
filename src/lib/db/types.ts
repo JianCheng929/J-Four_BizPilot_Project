@@ -57,6 +57,8 @@ export interface BusinessSettings {
   defaultTaxRate: number; // % SST applied on invoices, 0 if not registered
   invoicePrefix: string;
   targetMarginPct: number; // gross margin the owner aims for, used for margin alerts
+  /** Couriers, delivery fees, areas and lead times (e.g. copied from the owner's own website) */
+  deliveryInfo?: string;
   dismissedSignals?: Record<string, string>; // "BizPilot noticed" items the owner cleared: key -> ISO time (hidden 30 days)
   budgets?: Record<string, number>; // monthly spending budget per expense category, RM
   privacyNotice?: string; // PDPA privacy notice shown to customers
@@ -273,7 +275,7 @@ export interface SalesOrderLine {
   unitPrice: number;
 }
 
-export type SalesSource = 'manual' | 'pos' | 'shopee' | 'lazada' | 'tiktok_shop';
+export type SalesSource = 'manual' | 'pos' | 'shopee' | 'lazada' | 'tiktok_shop' | 'website';
 
 export interface Shipment {
   courier: string;

@@ -13,7 +13,7 @@ import { checkEngine } from '../agent/workbuddy.ts';
  */
 
 export const AUTOPILOT_PROMPT = `Daily autopilot run. The owner is not watching: do everything yourself, in this order, and skip any step whose integration is not connected (just note it):
-1. Sync orders and reviews from every connected marketplace (sync_marketplace). Then call get_signals and handle every item it lists, across all modules.
+1. Sync orders and reviews from every connected marketplace (sync_marketplace). If the owner's own website is connected, re-sync it with the website-import skill (new or changed products, stock and orders only). Then call get_signals and handle every item it lists, across all modules.
 2. Stock: check reorder suggestions and draft purchase orders for anything running low.
 3. Orders: for paid online orders awaiting fulfilment with an address, get courier quotes and request booking of the best option.
 4. Reviews: draft replies for new reviews in the brand voice; escalate safety, fake-product or refund complaints.

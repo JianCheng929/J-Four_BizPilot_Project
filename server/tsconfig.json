@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["src", "scripts", "../src/lib/ops.ts", "../src/lib/metrics.ts", "../src/lib/db/types.ts", "../src/lib/db/defaults.ts", "../src/lib/db/remote.ts"]
+}

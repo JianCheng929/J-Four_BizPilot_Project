@@ -1,0 +1,21 @@
+# Render Blueprint: deploys the BizPilot server from the Dockerfile.
+# Render dashboard → New → Blueprint → pick this repo. Fill in the secret values when asked.
+services:
+  - type: web
+    name: bizpilot-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CODEBUDDY_AUTH_TOKEN
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: PUBLIC_SERVER_URL
+        sync: false
+      - key: MYINVOIS_ENV
+        value: sandbox

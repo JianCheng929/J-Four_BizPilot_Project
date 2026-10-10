@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { query } from '@tencent-ai/agent-sdk';
+import { unstable_v2_authenticate } from '@tencent-ai/agent-sdk';
 import type { AuthEnvironment } from '@tencent-ai/agent-sdk';
 import { isSupabaseConfigured, supabaseAdmin } from '../lib/supabase.ts';
 
@@ -136,32 +136,26 @@ export function reportRun(ok: boolean, error?: string) {
 /**
  * Start the WorkBuddy runtime and read the signed-in account, without sending
  * a prompt to the model. Cached for 10 minutes.
+ * (query().accountInfo() is not used: it re-initialises without the
+ * environment and returns no account even when signed in.)
  */
 export async function checkEngine(force = false): Promise<Health> {
   if (!force && health && Date.now() - health.checkedAt < 10 * 60_000) return health;
   if (checking) return checking;
   checking = (async () => {
-    const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), 45_000);
     try {
-      const q = query({
-        prompt: 'ping',
-        options: { environment, pathToCodebuddyCode: cliPath(), env: runtimeEnv(), cwd: sandboxDir(), tools: [], maxTurns: 1, abortController: abort, settingSources: [], persistSession: false } as any,
+      // Ask the runtime who is signed in, the same way WorkBuddy's own sign-in does.
+      // If it offers a login link instead, nobody is signed in.
+      const signedIn = await new Promise<string>((resolve, reject) => {
+        unstable_v2_authenticate({
+          environment,
+          timeout: 45_000,
+          pathToCodebuddyCode: cliPath(),
+          env: runtimeEnv(),
+          onAuthUrl: () => reject(new Error('not signed in')),
+        }).then((r) => resolve(r.userinfo.userNickname || r.userinfo.userName || r.userinfo.userId), (e: Error) => reject(e));
       });
-      let info: any = null;
-      for await (const msg of q as AsyncIterable<any>) {
-        if (msg.type === 'system' && msg.subtype === 'init') {
-          info = await (q as any).accountInfo?.().catch(() => null);
-          abort.abort();
-          break;
-        }
-        if (msg.type === 'error' || (msg.type === 'result' && msg.is_error)) throw new Error(String(msg.error ?? msg.errors?.join('; ') ?? 'WorkBuddy error'));
-        if (msg.type === 'result') break;
-      }
-      // The runtime starts even when signed out, so only a real account counts as online.
-      const name = info?.userNickname || info?.userName || info?.email || info?.organization || info?.userId;
-      if (!name && !info?.token && !info?.apiKeySource) throw new Error('not signed in');
-      if (name) rememberAccount(String(name));
+      if (signedIn) rememberAccount(signedIn);
       health = { online: true, checkedAt: Date.now(), error: null };
       void saveLogin();
     } catch (e) {
@@ -170,7 +164,6 @@ export async function checkEngine(force = false): Promise<Health> {
         ? health
         : { online: false, checkedAt: Date.now(), error: AUTH_ERR.test(msg) ? 'The BizPilot WorkBuddy account is not signed in on the server.' : msg };
     } finally {
-      clearTimeout(timer);
       checking = null;
     }
     return health!;

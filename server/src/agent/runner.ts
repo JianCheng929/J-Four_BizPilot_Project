@@ -4,6 +4,7 @@ import { newId } from '../../../src/lib/db/defaults.ts';
 import { supabaseAdmin } from '../lib/supabase.ts';
 import { readSnapshot } from '../lib/workspace.ts';
 import { buildBizPilotServer } from './tools.ts';
+import { skillsIndex } from './skills.ts';
 import { cliPath, environment, rememberAccount, reportRun, runtimeEnv, sandboxDir, withRuntime } from './workbuddy.ts';
 
 /**
@@ -14,6 +15,7 @@ import { cliPath, environment, rememberAccount, reportRun, runtimeEnv, sandboxDi
 interface Live {
   task: AgentTask;
   businessId: string;
+  history: string;
   abort: AbortController;
   dirty: boolean;
 }
@@ -38,7 +40,8 @@ How to work:
 4. Money, prices, publishing, customer/supplier messages, e-invoices, courier bookings and stock corrections always go through approval tools (draft_purchase_order, request_price_change, draft_content with requestPublish, draft_review_reply, request_customer_email, request_einvoice_submit, request_shipment_booking, request_stock_adjustment, request_invoice_issue). Never claim something was sent, published or paid unless a tool result says so.
 5. Automation level is ${biz.level} (1 = suggest only, 2 = draft and ask for approval, 3 = low-risk routine actions may auto-execute). Approval limit RM${biz.limit}.
 6. Brand voice: ${biz.voice || 'friendly, clear, professional'}. Audience: ${biz.audience || 'Malaysian customers'}. Never use these claims: ${biz.banned || 'none set'}. Reply to customers in the language they wrote in (English, Malay or Chinese).
-7. Finish with a concise summary for the owner: what you found (with the real figures), what you did (record numbers), and which approvals are waiting for them. Use plain language, no markdown tables.
+7. ${skillsIndex()}
+8. Finish with a concise summary for the owner: what you found (with the real figures), what you did (record numbers), and which approvals are waiting for them. Use plain language, no markdown tables.
 `.trim();
 
 function push(l: Live, e: Omit<AgentEvent, 'at'>) {
@@ -69,20 +72,40 @@ function toolResultText(content: unknown): string {
   return JSON.stringify(content ?? '');
 }
 
-export async function startTask(businessId: string, prompt: string): Promise<AgentTask> {
+/** Earlier messages of the same chat, so WorkBuddy can follow up on what was said. */
+async function chatContext(businessId: string, conversationId: string): Promise<string> {
+  const { data, error } = await supabaseAdmin()
+    .from('agent_tasks')
+    .select('prompt, result, events, status')
+    .eq('business_id', businessId)
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false })
+    .limit(10);
+  if (error) throw new Error(error.message);
+  const turns = (data ?? []).reverse().map((t: any) => {
+    const messages = ((t.events ?? []) as AgentEvent[]).filter((e) => e.kind === 'message').map((e) => e.text);
+    const answer = [t.result, ...messages.slice(-2)].filter(Boolean).join('\n').slice(0, 4000);
+    return `Owner: ${String(t.prompt).slice(0, 2000)}\nYou (WorkBuddy): ${answer || `(${t.status}, no answer)`}`;
+  });
+  return turns.join('\n\n').slice(-16000);
+}
+
+export async function startTask(businessId: string, prompt: string, conversationId?: string | null): Promise<AgentTask> {
   for (const l of live.values()) {
     if (l.businessId === businessId) throw new Error('WorkBuddy is still working on the previous goal. Wait for it or cancel it.');
   }
+  const history = conversationId ? await chatContext(businessId, conversationId) : '';
   const now = new Date().toISOString();
+  const id = newId();
   const task: AgentTask = {
-    id: newId(), prompt, mode: 'local', status: 'starting', workbuddyTaskId: null, workbuddyLink: null,
+    id, conversationId: conversationId || id, prompt, mode: 'local', status: 'starting', workbuddyTaskId: null, workbuddyLink: null,
     events: [{ at: now, kind: 'status', text: 'Sending goal to WorkBuddy…' }], result: null, createdAt: now, updatedAt: now,
   };
   const { error } = await supabaseAdmin().from('agent_tasks').insert({
-    id: task.id, business_id: businessId, prompt, mode: task.mode, status: task.status, events: task.events, created_at: now, updated_at: now,
+    id: task.id, business_id: businessId, conversation_id: task.conversationId, prompt, mode: task.mode, status: task.status, events: task.events, created_at: now, updated_at: now,
   });
   if (error) throw new Error(error.message);
-  const l: Live = { task, businessId, abort: new AbortController(), dirty: false };
+  const l: Live = { task, businessId, history, abort: new AbortController(), dirty: false };
   live.set(task.id, l);
   void withRuntime(() => run(l));
   return task;
@@ -96,7 +119,9 @@ async function run(l: Live) {
     const s = db.settings;
     const { server, toolNames } = buildBizPilotServer(businessId, (e) => push(l, e));
     const q = query({
-      prompt: task.prompt,
+      prompt: l.history
+        ? `This continues an earlier conversation with the owner. Earlier messages, oldest first:\n\n${l.history}\n\n---\nThe owner's new message (answer this; "this", "it" or "yes" refer to the conversation above):\n${task.prompt}`
+        : task.prompt,
       options: {
         environment,
         pathToCodebuddyCode: cliPath(),

@@ -52,7 +52,7 @@ admin.post('/workbuddy/login', handle(async (req) => {
       .then(async (r) => {
         rememberAccount(r.userinfo.userNickname || r.userinfo.userName || r.userinfo.userId);
         current.state = 'done';
-        await saveLogin();
+        await saveLogin(true);
         await checkEngine(true);
       })
       .catch((e: Error) => {
@@ -96,7 +96,7 @@ a{color:#0f766e;font-weight:600;word-break:break-all}
 <div id="out">Enter the admin key, then check the status.</div>
 </main><script>
 const $=id=>document.getElementById(id);const out=$('out');let timer;
-const call=async(path,method='GET')=>{const r=await fetch('/admin/workbuddy'+path,{method,headers:{'x-admin-key':$('key').value}});const j=await r.json();if(!r.ok)throw new Error(j.error||r.statusText);return j};
+const call=async(path,method='GET')=>{const r=await fetch('/admin/workbuddy'+path,{method,headers:{'x-admin-key':$('key').value}});let j;try{j=await r.json()}catch{throw new Error('The server is restarting or busy (HTTP '+r.status+'). Wait until Render shows Live, then try again.')}if(!r.ok)throw new Error(j.error||r.statusText);return j};
 const show=j=>{const e=j.engine;const l=j.login;let t=e?(e.connected?'Engine: ONLINE'+(e.account?' as '+e.account:''):'Engine: offline'+(e.error?' ('+e.error+')':'')):'';
  if(l&&l.state==='waiting'&&l.url){out.innerHTML='';const a=document.createElement('a');a.href=l.url;a.target='_blank';a.rel='noopener';a.textContent='Open this link and sign in to WorkBuddy';out.append(a,document.createTextNode('\\n\\nThis page updates by itself when you finish.\\n'+t));return}
  if(l&&l.state==='failed')t='Sign-in failed: '+l.error+'\\n'+t;if(l&&l.state==='done')t='Signed in.\\n'+t;out.textContent=t};

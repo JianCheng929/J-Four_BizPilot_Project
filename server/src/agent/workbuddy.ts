@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unstable_v2_authenticate } from '@tencent-ai/agent-sdk';
@@ -37,14 +37,16 @@ export function authDir() {
  * are always in the format this machine's runtime can read.
  */
 const LOGIN_KEY = 'workbuddy_login';
-const LOGIN_FILE = /^[\w-]+\.info$/;
+const LOGIN_FILE = /^[\w-][\w.-]*$/; // any plain file name in authDir()
 let lastSaved = '';
 
 function readLoginFiles(): Record<string, string> {
   const dir = authDir();
   if (!existsSync(dir)) return {};
   const files: Record<string, string> = {};
-  for (const f of readdirSync(dir)) if (LOGIN_FILE.test(f)) files[f] = readFileSync(join(dir, f), 'utf8');
+  for (const f of readdirSync(dir)) {
+    if (LOGIN_FILE.test(f) && statSync(join(dir, f)).isFile()) files[f] = readFileSync(join(dir, f), 'utf8');
+  }
   return files;
 }
 
@@ -56,25 +58,35 @@ export async function restoreLogin() {
     console.error(`Could not load the saved WorkBuddy login: ${error.message} (run the server_secrets SQL in DEPLOY.md)`);
     return false;
   }
-  if (!data?.value) return false;
+  if (!data?.value) {
+    console.log('No saved WorkBuddy login in Supabase yet: sign in at /admin/workbuddy.');
+    return false;
+  }
   const files = JSON.parse(String(data.value)) as Record<string, string>;
   const dir = authDir();
   mkdirSync(dir, { recursive: true });
   for (const [f, body] of Object.entries(files)) if (LOGIN_FILE.test(f)) writeFileSync(join(dir, f), body, { mode: 0o600 });
   lastSaved = JSON.stringify(files);
+  console.log(`WorkBuddy login restored from Supabase (${Object.keys(files).length} file(s)).`);
   return true;
 }
 
 /** Copy the login files to Supabase when they change (a new sign-in or a refreshed token). */
-export async function saveLogin() {
+export async function saveLogin(report = false) {
   if (!isSupabaseConfigured()) return;
   const files = readLoginFiles();
-  if (!Object.keys(files).length) return;
+  if (!Object.keys(files).length) {
+    if (report) console.error(`WorkBuddy login not saved: no files in ${authDir()}`);
+    return;
+  }
   const value = JSON.stringify(files);
   if (value === lastSaved) return;
   const { error } = await supabaseAdmin().from('server_secrets').upsert({ key: LOGIN_KEY, value, updated_at: new Date().toISOString() });
   if (error) console.error(`Could not save the WorkBuddy login: ${error.message}`);
-  else lastSaved = value;
+  else {
+    lastSaved = value;
+    console.log(`WorkBuddy login saved to Supabase (${Object.keys(files).join(', ')}).`);
+  }
 }
 
 export async function forgetLogin() {

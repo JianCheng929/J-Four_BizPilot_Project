@@ -1,3 +1,4 @@
+import { WarehouseTab } from '@/components/bizpilot/WarehouseTab';
 import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useMemo, useRef, useState } from 'react';
 import {
@@ -220,6 +221,7 @@ export function Inventory() {
           <TabsTrigger value="locations">
             Locations &amp; transfers{db.transfers.some((t) => t.status === 'in_transit') && <Badge className="ml-1.5 h-4 bg-blue-500 px-1.5 text-[10px]">{db.transfers.filter((t) => t.status === 'in_transit').length}</Badge>}
           </TabsTrigger>
+          <TabsTrigger value="warehouse">Warehouse{(db.staffTasks ?? []).some((t) => t.status === 'open') ? ' •' : ''}</TabsTrigger>
           <TabsTrigger value="counts">Stock counts</TabsTrigger>
           <TabsTrigger value="movements">Movement history</TabsTrigger>
           <TabsTrigger value="reorder">
@@ -512,6 +514,7 @@ export function Inventory() {
         </TabsContent>
 
         <TabsContent value="locations" className="mt-4"><LocationsTab /></TabsContent>
+        <TabsContent value="warehouse" className="mt-4"><WarehouseTab /></TabsContent>
         <TabsContent value="counts" className="mt-4"><StockCountsTab /></TabsContent>
 
         <TabsContent value="reorder" className="mt-4 space-y-4">

@@ -31,16 +31,21 @@ export const TABLES: Record<CollectionKey, { table: string; order?: string; limi
   stockCounts: { table: 'stock_counts', order: 'created_at', optional: true },
   productionOrders: { table: 'production_orders', order: 'created_at', optional: true },
   quotations: { table: 'quotations', order: 'issued_date', optional: true },
+  staffTasks: { table: 'staff_tasks', order: 'created_at', limit: 500, optional: true },
+  consents: { table: 'consents', order: 'at', limit: 5000, optional: true },
   approvals: { table: 'approval_requests', order: 'created_at' },
   auditLog: { table: 'audit_log', order: 'at', limit: 500 },
   notifications: { table: 'notifications', order: 'at', limit: 200 },
   agentTasks: { table: 'agent_tasks', order: 'created_at', limit: 50 },
 };
 
+/** Optional tables whose SQL has not been run yet: changes to them are skipped instead of failing the whole save. */
+const missingTables = new Set<string>();
+
 // Collections displayed newest-first in the UI
 const DESC = new Set<CollectionKey>([
   'stockMovements', 'salesOrders', 'expenses', 'invoices', 'reviews', 'tickets',
-  'approvals', 'auditLog', 'notifications', 'agentTasks', 'purchaseOrders', 'returns', 'transfers', 'stockCounts', 'productionOrders', 'quotations',
+  'approvals', 'auditLog', 'notifications', 'agentTasks', 'purchaseOrders', 'returns', 'transfers', 'stockCounts', 'productionOrders', 'quotations', 'staffTasks', 'consents',
 ]);
 
 const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -116,10 +121,12 @@ export async function loadSnapshot(client: SupabaseClient, business: BusinessRow
       const { data, error } = await q;
       if (error) {
         if (cfg.optional && (error.code === '42P01' || error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message))) {
+          missingTables.add(cfg.table);
           return [key, []] as const;
         }
         throw new Error(`Loading ${cfg.table}: ${error.message}`);
       }
+      missingTables.delete(cfg.table);
       if (versions) {
         for (const r of (data ?? []) as Record<string, unknown>[]) {
           if (typeof r.row_version === 'number') versions.set(versionKey(cfg.table, String(r.id)), r.row_version);
@@ -173,12 +180,14 @@ export async function persistDiff(
     if (error) throw new Error(`Saving settings: ${error.message}`);
   }
   for (const [key, rows] of Object.entries(diff.upserts) as [CollectionKey, object[]][]) {
+    if (missingTables.has(TABLES[key].table)) continue;
     const { error } = await client
       .from(TABLES[key].table)
       .upsert(rows.map((r) => toRow(r, businessId)), { onConflict: 'id' });
     if (error) throw new Error(`Saving ${TABLES[key].table}: ${error.message}`);
   }
   for (const [key, ids] of Object.entries(diff.deletes) as [CollectionKey, string[]][]) {
+    if (missingTables.has(TABLES[key].table)) continue;
     const { error } = await client.from(TABLES[key].table).delete().in('id', ids).eq('business_id', businessId);
     if (error) throw new Error(`Deleting from ${TABLES[key].table}: ${error.message}`);
   }
@@ -193,6 +202,7 @@ interface Change {
 }
 
 let legacyWarned = false;
+
 
 /**
  * Save the difference between two snapshots in ONE database transaction
@@ -216,12 +226,14 @@ export async function commitDiff(
   }
   for (const [key, rows] of Object.entries(diff.upserts) as [CollectionKey, { id: string }[]][]) {
     const table = TABLES[key].table;
+    if (missingTables.has(table)) continue;
     for (const r of rows) {
       changes.push({ table, op: 'upsert', id: r.id, version: versions.get(versionKey(table, r.id)) ?? null, row: toRow(r, businessId) });
     }
   }
   for (const [key, ids] of Object.entries(diff.deletes) as [CollectionKey, string[]][]) {
     const table = TABLES[key].table;
+    if (missingTables.has(table)) continue;
     for (const id of ids) changes.push({ table, op: 'delete', id, version: versions.get(versionKey(table, id)) ?? null });
   }
   if (!changes.length) return;

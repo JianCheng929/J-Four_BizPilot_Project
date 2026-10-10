@@ -25,6 +25,8 @@ import type {
   StockMovement,
   Supplier,
   SupportTicket,
+  StaffTask,
+  Consent,
 } from './db/types';
 import { newId } from './db/defaults';
 import { cashPosition } from './metrics';
@@ -563,6 +565,7 @@ export function shipTransfer(db: BizPilotDB, id: string, actor: string): StockTr
   }
   t.status = 'in_transit';
   t.shippedAt = now();
+  addStaffTask(db, { kind: 'receive', title: `Receive ${t.transferNumber} from ${from.name}`, detail: t.lines.map((l) => `${l.quantity}× ${db.products.find((x) => x.id === l.productId)?.name ?? 'item'}`).join(', '), locationId: to.id, ref: t.transferNumber }, actor);
   audit(db, actor, 'ship', 'transfer', t.transferNumber, `${t.transferNumber} left ${from.name}`);
   return t;
 }
@@ -598,6 +601,7 @@ export function receiveTransfer(db: BizPilotDB, id: string, received: Record<str
   t.status = 'received';
   t.receivedAt = now();
   if (short.length) notify(db, `Transfer short: ${t.transferNumber}`, `Received ${short.join(', ')}. The missing units were written off; check with whoever sent them.`, 'warning');
+  closeStaffTasks(db, t.transferNumber, actor);
   audit(db, actor, 'receive', 'transfer', t.transferNumber, `${t.transferNumber} received at ${to.name}${short.length ? ` (short: ${short.join(', ')})` : ''}`);
   return t;
 }
@@ -617,6 +621,7 @@ export function cancelTransfer(db: BizPilotDB, id: string, actor: string): Stock
       p.locationStock = tidy(ls);
     }
   }
+  dropStaffTasks(db, t.transferNumber);
   t.status = 'cancelled';
   audit(db, actor, 'cancel', 'transfer', t.transferNumber, `${t.transferNumber} cancelled`);
   return t;
@@ -676,6 +681,7 @@ export function startStockCount(db: BizPilotDB, input: { locationId?: string | n
   };
   db.stockCounts.unshift(c);
   const where = locationId ? db.locations.find((l) => l.id === locationId)!.name : 'all stock';
+  addStaffTask(db, { kind: 'count', title: `Count stock for ${c.countNumber}`, detail: `${c.lines.length} products at ${locationId ? db.locations.find((l) => l.id === locationId)!.name : 'all stock'}${c.blind ? ' (blind count: system quantities hidden)' : ''}. Enter the counts in Inventory → Stock counts.`, locationId, ref: c.countNumber }, actor);
   audit(db, actor, 'create', 'stock_count', c.countNumber, `${c.countNumber} started (${where}, ${c.lines.length} products${c.blind ? ', blind' : ''})`);
   return c;
 }
@@ -688,6 +694,16 @@ export function recordCount(db: BizPilotDB, countId: string, productId: string, 
   if (!line) throw new OpError('That product is not on this count.');
   if (counted !== null && (!Number.isInteger(counted) || counted < 0)) throw new OpError('Counts must be whole numbers, 0 or more.');
   line.counted = counted;
+}
+
+export function cancelStockCount(db: BizPilotDB, countId: string, actor: string): StockCount {
+  const c = db.stockCounts.find((x) => x.id === countId || x.countNumber === countId);
+  if (!c) throw new OpError('Stock count not found.');
+  if (c.status !== 'open') throw new OpError(`${c.countNumber} is already ${c.status}.`);
+  c.status = 'cancelled';
+  dropStaffTasks(db, c.countNumber);
+  audit(db, actor, 'cancel', 'stock_count', c.countNumber, `${c.countNumber} cancelled`);
+  return c;
 }
 
 /** Differences go to Approvals as one request; a count with no differences closes straight away. */
@@ -719,6 +735,7 @@ export function submitStockCount(db: BizPilotDB, countId: string, actor: string)
     payload: { countId: c.id },
     amount: round2(value),
   }, actor);
+  closeStaffTasks(db, c.countNumber, actor);
   audit(db, actor, 'submit', 'stock_count', c.countNumber, `${c.countNumber}: ${diffs.length} difference(s) worth RM${value.toFixed(2)} sent for approval`);
   return { count: c, approval };
 }
@@ -1295,6 +1312,8 @@ export function placePurchaseOrder(db: BizPilotDB, poId: string, actor: string):
     const p = db.products.find((x) => x.id === l.productId);
     if (p) p.incoming += l.quantity;
   }
+  const supplier = db.suppliers.find((x) => x.id === po.supplierId)?.name ?? 'the supplier';
+  addStaffTask(db, { kind: 'receive', title: `Receive ${po.poNumber} from ${supplier}`, detail: `${po.lines.map((l) => `${l.quantity}× ${db.products.find((x) => x.id === l.productId)?.name ?? 'item'}`).join(', ')}. Check quantities and condition, then record the delivery in Supply Chain.`, locationId: po.locationId ?? '', ref: po.poNumber, dueDate: po.expectedDate ?? null }, actor);
   audit(db, actor, 'execute', 'purchase_order', po.poNumber, `${po.poNumber} placed with supplier`);
   return po;
 }
@@ -1336,6 +1355,7 @@ export function receivePurchaseOrder(
   po.status = complete ? 'received' : 'partially_received';
   if (complete) po.receivedAt = now();
   recalcSupplierStats(db);
+  if (po.status === 'received') closeStaffTasks(db, po.poNumber, actor);
   audit(db, actor, 'receive', 'purchase_order', po.poNumber, `${po.poNumber} ${po.status}`);
   return po;
 }
@@ -1351,6 +1371,7 @@ export function cancelPurchaseOrder(db: BizPilotDB, poId: string, actor: string)
     }
   }
   po.status = 'cancelled';
+  dropStaffTasks(db, po.poNumber);
   for (const a of db.approvals) {
     if (a.status === 'pending' && a.type === 'purchase_order' && a.payload?.purchaseOrderId === po.id) {
       a.status = 'rejected'; a.decidedAt = now(); a.decidedBy = actor; a.executionResult = `${po.poNumber} was cancelled`;
@@ -1446,6 +1467,7 @@ export function fulfilSalesOrder(db: BizPilotDB, orderId: string, actor: string)
     recordStockMovement(db, p.id, 'out', l.quantity, `Sold – ${o.orderNumber}`, o.orderNumber, actor, { locationId: o.locationId });
   }
   o.status = 'fulfilled';
+  closeStaffTasks(db, o.orderNumber, actor);
   audit(db, actor, 'fulfil', 'sales_order', o.orderNumber, `${o.orderNumber} fulfilled`);
   return o;
 }
@@ -1462,6 +1484,8 @@ export function cancelSalesOrder(db: BizPilotDB, orderId: string, actor: string,
     else recordStockMovement(db, p.id, 'in', l.quantity, `Returned – ${o.orderNumber}`, o.orderNumber, actor, { locationId: o.locationId });
   }
   o.status = 'cancelled';
+  if (o.pickStatus) o.pickStatus = null;
+  dropStaffTasks(db, o.orderNumber);
   if (refund) o.paymentStatus = 'refunded';
   const inv = o.invoiceId ? db.invoices.find((i) => i.id === o.invoiceId) : undefined;
   if (inv && (inv.status === 'draft' || inv.status === 'issued' || inv.status === 'overdue') && inv.einvoice?.status !== 'valid') {
@@ -2218,6 +2242,10 @@ export function applyApprovedAction(db: BizPilotDB, req: ApprovalRequest, actor:
       audit(db, actor, 'execute', 'campaign', c.id, `Campaign ${c.name}: ${c.status}, budget RM${c.budget.toFixed(2)}`);
       return `${c.name} is ${c.status} with a RM${c.budget.toFixed(2)} budget. Start or adjust it in the ad platform; record spend and results here.`;
     }
+    case 'data_erasure': {
+      const n = eraseCustomerData(db, String(p.customer), actor);
+      return `Personal data erased from ${n} record(s). Amounts on invoices are kept for tax records (7 years).`;
+    }
     case 'refund': {
       if (p.orderId) {
         const o = cancelSalesOrder(db, String(p.orderId), actor, true);
@@ -2338,4 +2366,304 @@ export function rejectReturn(db: BizPilotDB, id: string, why: string, actor: str
   ret.notes = [ret.notes, `Rejected: ${why}`].filter(Boolean).join('\n');
   audit(db, actor, 'reject', 'return', ret.returnNumber, why);
   return ret;
+}
+
+
+// ---------------------------------------------------------------- warehouse (blueprint §5 A3)
+
+/** Shelf/bin code of a product at a location ('' = default location). */
+export function binOf(db: BizPilotDB, p: Product, locationId?: string | null): string {
+  const bins = p.bins ?? {};
+  const loc = locationId || defaultLocation(db)?.id || '';
+  return bins[loc] ?? bins[''] ?? '';
+}
+
+export function setBin(db: BizPilotDB, productId: string, locationId: string | null, bin: string, actor: string): Product {
+  const p = requireProduct(db, productId);
+  const code = bin.trim().toUpperCase();
+  const key = locationId || '';
+  if (key && !db.locations.some((l) => l.id === key)) throw new OpError('Location not found.');
+  const bins = { ...(p.bins ?? {}) };
+  if (code) bins[key] = code; else delete bins[key];
+  p.bins = bins;
+  audit(db, actor, 'update', 'product', p.sku, `${p.name}: bin ${code || 'cleared'}${key ? ` at ${db.locations.find((l) => l.id === key)?.name}` : ''}`);
+  return p;
+}
+
+export interface PickLine { product: Product; bin: string; quantity: number; orders: string[] }
+
+/** One walk through the shelves: every line of the orders, grouped by product and sorted by bin. */
+export function pickList(db: BizPilotDB, orderIds?: string[]): { orders: SalesOrder[]; lines: PickLine[] } {
+  const orders = db.salesOrders.filter((o) => o.status === 'awaiting_fulfilment' && o.pickStatus !== 'picked' && o.pickStatus !== 'packed'
+    && (!orderIds?.length || orderIds.includes(o.id) || orderIds.includes(o.orderNumber)));
+  const map = new Map<string, PickLine>();
+  for (const o of orders) {
+    for (const l of o.lines) {
+      const p = l.productId ? db.products.find((x) => x.id === l.productId) : undefined;
+      if (!p) continue;
+      const key = `${p.id}|${o.locationId ?? ''}`;
+      const line = map.get(key) ?? { product: p, bin: binOf(db, p, o.locationId), quantity: 0, orders: [] };
+      line.quantity += l.quantity;
+      if (!line.orders.includes(o.orderNumber)) line.orders.push(o.orderNumber);
+      map.set(key, line);
+    }
+  }
+  const lines = [...map.values()].sort((a, b) => (a.bin || '~').localeCompare(b.bin || '~') || a.product.name.localeCompare(b.product.name));
+  return { orders, lines };
+}
+
+/** Start a pick run: orders move to "picking" and one pick task lists every shelf to visit. */
+export function startPickRun(db: BizPilotDB, orderIds: string[] | undefined, actor: string, assignee = ''): { task: StaffTask; orders: SalesOrder[] } {
+  const { orders } = pickList(db, orderIds);
+  const todo = orders.filter((o) => o.pickStatus !== 'picking');
+  if (!todo.length) throw new OpError('No orders are waiting to be picked.');
+  const run = pickList(db, todo.map((o) => o.id));
+  for (const o of todo) o.pickStatus = 'picking';
+  const task = addStaffTask(db, {
+    kind: 'pick', assignee, locationId: todo[0].locationId ?? '',
+    title: `Pick ${todo.length} order(s)`,
+    detail: run.lines.map((l) => `${l.bin || 'no bin'}: ${l.quantity}× ${l.product.name} (${l.product.sku}) for ${l.orders.join(', ')}`).join('\n'),
+    ref: todo.map((o) => o.orderNumber).join(', '),
+  }, actor);
+  return { task, orders: todo };
+}
+
+export function markPicked(db: BizPilotDB, orderId: string, actor: string): SalesOrder {
+  const o = db.salesOrders.find((x) => x.id === orderId || x.orderNumber === orderId);
+  if (!o) throw new OpError('Order not found.');
+  if (o.status !== 'awaiting_fulfilment') throw new OpError(`${o.orderNumber} is ${o.status}.`);
+  if (o.pickStatus === 'picked' || o.pickStatus === 'packed') return o;
+  for (const l of o.lines) {
+    const p = l.productId ? db.products.find((x) => x.id === l.productId) : undefined;
+    if (p && p.stock < l.quantity) throw new OpError(`Only ${p.stock} ${p.name} on hand; ${o.orderNumber} needs ${l.quantity}.`);
+  }
+  o.pickStatus = 'picked';
+  o.pickedAt = now();
+  audit(db, actor, 'pick', 'sales_order', o.orderNumber, `${o.orderNumber} picked`);
+  return o;
+}
+
+/** Packed and labelled: ready for the courier or the counter. A pack task follows for online orders without a booking. */
+export function markPacked(db: BizPilotDB, orderId: string, actor: string): SalesOrder {
+  const o = db.salesOrders.find((x) => x.id === orderId || x.orderNumber === orderId);
+  if (!o) throw new OpError('Order not found.');
+  if (o.status !== 'awaiting_fulfilment') throw new OpError(`${o.orderNumber} is ${o.status}.`);
+  if (o.pickStatus !== 'picked' && o.pickStatus !== 'picking') markPicked(db, o.id, actor);
+  o.pickStatus = 'packed';
+  o.packedAt = now();
+  o.packedBy = actor;
+  closeStaffTasks(db, o.orderNumber, actor);
+  audit(db, actor, 'pack', 'sales_order', o.orderNumber, `${o.orderNumber} packed`);
+  return o;
+}
+
+/** Barcode scan: the product with this barcode or SKU. */
+export function findByCode(db: BizPilotDB, code: string): Product | undefined {
+  const c = code.trim();
+  if (!c) return undefined;
+  const lc = c.toLowerCase();
+  return db.products.find((p) => p.barcode && p.barcode === c) ?? db.products.find((p) => p.sku.toLowerCase() === lc);
+}
+
+export interface StaffTaskInput { kind: StaffTask['kind']; title: string; detail?: string; assignee?: string; locationId?: string | null; ref?: string; dueDate?: string | null }
+
+export function addStaffTask(db: BizPilotDB, input: StaffTaskInput, actor: string): StaffTask {
+  const list = (db.staffTasks ??= []);
+  const t: StaffTask = {
+    id: newId(),
+    taskNumber: nextNumber(list.map((x) => x.taskNumber), 'TSK'),
+    title: input.title.trim(),
+    detail: input.detail?.trim() ?? '',
+    kind: input.kind,
+    assignee: input.assignee?.trim().toLowerCase() ?? '',
+    locationId: input.locationId ?? '',
+    ref: input.ref ?? '',
+    dueDate: input.dueDate || null,
+    status: 'open',
+    createdAt: now(),
+    completedAt: null,
+    createdBy: actor,
+    doneBy: '',
+  };
+  if (!t.title) throw new OpError('Give the task a title.');
+  list.unshift(t);
+  return t;
+}
+
+export function updateStaffTask(db: BizPilotDB, id: string, patch: Partial<Pick<StaffTask, 'status' | 'assignee' | 'dueDate' | 'title' | 'detail'>>, actor: string): StaffTask {
+  const t = (db.staffTasks ?? []).find((x) => x.id === id || x.taskNumber === id);
+  if (!t) throw new OpError('Task not found.');
+  if (patch.title !== undefined) t.title = patch.title.trim() || t.title;
+  if (patch.detail !== undefined) t.detail = patch.detail;
+  if (patch.assignee !== undefined) t.assignee = patch.assignee.trim().toLowerCase();
+  if (patch.dueDate !== undefined) t.dueDate = patch.dueDate || null;
+  if (patch.status && patch.status !== t.status) {
+    t.status = patch.status;
+    if (patch.status === 'done') { t.completedAt = now(); t.doneBy = actor; }
+    audit(db, actor, 'update', 'task', t.taskNumber, `${t.taskNumber} ${patch.status}: ${t.title}`);
+  }
+  return t;
+}
+
+/** The work was called off: its open tasks are cancelled. */
+function dropStaffTasks(db: BizPilotDB, ref: string) {
+  for (const t of db.staffTasks ?? []) {
+    if ((t.status === 'open' || t.status === 'in_progress') && t.ref.split(',').map((x) => x.trim()).includes(ref)) {
+      const rest = t.ref.split(',').map((x) => x.trim()).filter((x) => x && x !== ref);
+      if (rest.length) t.ref = rest.join(', '); else t.status = 'cancelled';
+    }
+  }
+}
+
+/** Work that is finished in the records closes its open task (receive, count, pick). */
+function closeStaffTasks(db: BizPilotDB, ref: string, actor: string) {
+  for (const t of db.staffTasks ?? []) {
+    if (t.status === 'done' || t.status === 'cancelled') continue;
+    const refs = t.ref.split(',').map((x) => x.trim()).filter(Boolean);
+    if (!refs.includes(ref)) continue;
+    const allDone = refs.every((r) => {
+      const o = db.salesOrders.find((x) => x.orderNumber === r);
+      if (!o) return r === ref;
+      return o.status !== 'awaiting_fulfilment' || (t.kind === 'pick' ? o.pickStatus === 'picked' || o.pickStatus === 'packed' : o.pickStatus === 'packed');
+    });
+    if (allDone) { t.status = 'done'; t.completedAt = now(); t.doneBy = actor; }
+  }
+}
+
+// ---------------------------------------------------------------- "BizPilot noticed"
+
+/** Clear a noticed item; it stays hidden for 30 days. Old entries are pruned. */
+export function dismissSignal(db: BizPilotDB, key: string, actor: string) {
+  const at = Date.now();
+  const kept = Object.entries(db.settings.dismissedSignals ?? {}).filter(([, t]) => at - Date.parse(t) < 30 * 86_400_000);
+  db.settings.dismissedSignals = { ...Object.fromEntries(kept), [key]: new Date(at).toISOString() };
+  audit(db, actor, 'update', 'settings', 'noticed', `Cleared "${key}"`);
+}
+
+// ---------------------------------------------------------------- finance extras (blueprint §8 D)
+
+export function setBudget(db: BizPilotDB, category: string, monthly: number, actor: string) {
+  const cat = category.trim();
+  if (!cat) throw new OpError('Give the expense category.');
+  if (!(monthly >= 0)) throw new OpError('The budget must be 0 or more.');
+  const budgets = { ...(db.settings.budgets ?? {}) };
+  if (monthly === 0) delete budgets[cat]; else budgets[cat] = round2(monthly);
+  db.settings.budgets = budgets;
+  audit(db, actor, 'update', 'settings', 'budget', monthly ? `Budget ${cat}: RM${monthly.toFixed(2)}/month` : `Budget ${cat} removed`);
+  return budgets;
+}
+
+export function attachReceipt(db: BizPilotDB, expenseId: string, path: string, actor: string): Expense {
+  const x = db.expenses.find((e) => e.id === expenseId);
+  if (!x) throw new OpError('Expense not found.');
+  x.receiptUrl = path;
+  audit(db, actor, 'update', 'expense', x.id, `Receipt ${path ? 'attached to' : 'removed from'} ${x.description}`);
+  return x;
+}
+
+// ---------------------------------------------------------------- PDPA (blueprint §17)
+
+export const customerKeyOf = (email?: string, phone?: string) =>
+  (email?.trim().toLowerCase() || (phone ?? '').replace(/\D/g, '')).trim();
+
+export interface ConsentInput { customerName?: string; email?: string; phone?: string; purpose: Consent['purpose']; channel?: Consent['channel']; status: Consent['status']; source: string; note?: string }
+
+/** Consent history is kept: each change is a new record; the latest one counts. */
+export function recordConsent(db: BizPilotDB, input: ConsentInput, actor: string): Consent {
+  const key = customerKeyOf(input.email, input.phone);
+  if (!key) throw new OpError('Give the customer\'s email or phone number.');
+  if (!input.source.trim()) throw new OpError('Say how the consent was given (e.g. "signed up at the counter", "WhatsApp reply").');
+  const c: Consent = {
+    id: newId(), customerKey: key, customerName: input.customerName?.trim() ?? '', email: input.email?.trim() ?? '', phone: input.phone?.trim() ?? '',
+    purpose: input.purpose, channel: input.channel ?? 'any', status: input.status, source: input.source.trim(), note: input.note?.trim() ?? '', at: now(), recordedBy: actor,
+  };
+  (db.consents ??= []).unshift(c);
+  audit(db, actor, 'consent', 'customer', key, `${input.purpose} consent ${input.status} (${c.source})`);
+  return c;
+}
+
+/** Latest consent for this customer and purpose (and channel, if given). */
+export function consentStatus(db: BizPilotDB, emailOrPhone: string, purpose: Consent['purpose'], channel?: Consent['channel']): Consent | null {
+  const key = emailOrPhone.includes('@') ? emailOrPhone.trim().toLowerCase() : emailOrPhone.replace(/\D/g, '');
+  if (!key) return null;
+  const list = (db.consents ?? []).filter((c) => c.customerKey === key && c.purpose === purpose && (!channel || c.channel === 'any' || c.channel === channel));
+  return list.sort((a, b) => b.at.localeCompare(a.at))[0] ?? null;
+}
+
+/** Marketing messages need recorded, un-withdrawn consent (PDPA s.43 and the opt-out rule). */
+export function assertMarketingConsent(db: BizPilotDB, emailOrPhone: string, channel: Consent['channel']) {
+  const c = consentStatus(db, emailOrPhone, 'marketing', channel);
+  if (!c || c.status !== 'granted') throw new OpError(`${emailOrPhone} has ${c ? 'withdrawn' : 'not given'} consent to marketing messages. Only service messages (orders, invoices, support) may be sent.`);
+}
+
+const matchesCustomer = (key: string, email?: string, phone?: string, name?: string) => {
+  const k = key.trim().toLowerCase();
+  if (!k) return false;
+  if (k.includes('@')) return (email ?? '').trim().toLowerCase() === k;
+  const digits = k.replace(/\D/g, '');
+  if (digits.length >= 6) return (phone ?? '').replace(/\D/g, '') === digits;
+  return (name ?? '').trim().toLowerCase() === k;
+};
+
+/** Everything BizPilot holds about one customer (PDPA access request). */
+export function customerDataExport(db: BizPilotDB, key: string) {
+  return {
+    customer: key,
+    exportedAt: now(),
+    orders: db.salesOrders.filter((o) => matchesCustomer(key, o.customerEmail, o.customerPhone, o.customerName)).map((o) => ({ orderNumber: o.orderNumber, date: o.date, name: o.customerName, email: o.customerEmail, phone: o.customerPhone, address: o.shippingAddress, total: o.total, lines: o.lines })),
+    invoices: db.invoices.filter((i) => matchesCustomer(key, i.customerEmail, i.customerPhone, i.customerName)).map((i) => ({ invoiceNumber: i.invoiceNumber, date: i.issuedDate, name: i.customerName, email: i.customerEmail, phone: i.customerPhone, address: i.customerAddress, tin: i.customerTin, total: i.total })),
+    quotations: db.quotations.filter((q) => matchesCustomer(key, q.customerEmail, q.customerPhone, q.customerName)).map((q) => ({ quoteNumber: q.quoteNumber, name: q.customerName, email: q.customerEmail, total: q.total })),
+    tickets: db.tickets.filter((t) => matchesCustomer(key, t.customerEmail, undefined, t.customerName)).map((t) => ({ subject: t.subject, body: t.body, status: t.status })),
+    reviews: db.reviews.filter((r) => matchesCustomer(key, undefined, undefined, r.customerName)).map((r) => ({ source: r.source, rating: r.rating, text: r.text, date: r.date })),
+    consents: (db.consents ?? []).filter((c) => matchesCustomer(key, c.email, c.phone, c.customerName)),
+  };
+}
+
+/** Request to delete a customer's personal data: irreversible, so the owner approves it. */
+export function requestDataErasure(db: BizPilotDB, key: string, reason: string, actor: string): ApprovalRequest {
+  const found = customerDataExport(db, key);
+  const n = found.orders.length + found.invoices.length + found.quotations.length + found.tickets.length + found.reviews.length + found.consents.length;
+  if (!n) throw new OpError(`No records found for ${key}.`);
+  return requestApproval(db, {
+    type: 'data_erasure', title: `Erase personal data of ${key}`,
+    description: `${reason}. Removes name, email, phone and address from ${n} record(s). Order and invoice amounts stay for tax records. This cannot be undone.`,
+    payload: { customer: key }, risk: 'high',
+  }, actor);
+}
+
+export function eraseCustomerData(db: BizPilotDB, key: string, actor: string): number {
+  let n = 0;
+  const label = 'Erased customer';
+  for (const o of db.salesOrders) if (matchesCustomer(key, o.customerEmail, o.customerPhone, o.customerName)) { o.customerName = label; o.customerEmail = ''; o.customerPhone = ''; o.shippingAddress = ''; n++; }
+  for (const i of db.invoices) if (matchesCustomer(key, i.customerEmail, i.customerPhone, i.customerName) && i.status !== 'paid' && i.einvoice?.status !== 'valid') { i.customerEmail = ''; i.customerPhone = ''; n++; }
+  for (const q of db.quotations) if (matchesCustomer(key, q.customerEmail, q.customerPhone, q.customerName)) { q.customerName = label; q.customerEmail = ''; q.customerPhone = ''; q.customerAddress = ''; n++; }
+  for (const t of db.tickets) if (matchesCustomer(key, t.customerEmail, undefined, t.customerName)) { t.customerName = label; t.customerEmail = ''; n++; }
+  for (const r of db.reviews) if (matchesCustomer(key, undefined, undefined, r.customerName)) { r.customerName = label; n++; }
+  for (const c of db.consents ?? []) if (matchesCustomer(key, c.email, c.phone, c.customerName)) { c.customerName = ''; c.email = ''; c.phone = ''; n++; }
+  audit(db, actor, 'erase', 'customer', 'personal data', `Personal data erased from ${n} record(s)`);
+  return n;
+}
+
+// ---------------------------------------------------------------- branch comparison (blueprint §8 D, §9 F)
+
+export interface BranchRow { locationId: string; name: string; orders: number; revenue: number; grossProfit: number; marginPct: number; expenses: number; netProfit: number; stockValue: number; avgOrder: number }
+
+export function branchComparison(db: BizPilotDB, days = 30, now = Date.now()): BranchRow[] {
+  const since = new Date(now - days * 86_400_000).toISOString();
+  const def = defaultLocation(db)?.id ?? '';
+  const locs = db.locations.length ? db.locations : [{ id: '', name: db.settings.name || 'Main' } as Location];
+  return locs.map((l) => {
+    const orders = db.salesOrders.filter((o) => o.date >= since && o.status !== 'cancelled' && o.paymentStatus !== 'refunded' && (o.locationId || def) === l.id);
+    const revenue = orders.reduce((s, o) => s + o.total, 0);
+    const cost = orders.reduce((s, o) => s + o.lines.reduce((c, line) => c + (db.products.find((p) => p.id === line.productId)?.unitCost ?? 0) * line.quantity, 0), 0);
+    // Costs not tied to a branch (head office, software) are left out of every branch.
+    const expenses = db.expenses.filter((e) => e.date >= since && (!db.locations.length || e.locationId === l.id)).reduce((s, e) => s + e.amount, 0);
+    const stockValue = db.products.reduce((s, p) => s + stockAt(db, p, l.id || null) * p.unitCost, 0);
+    const gp = revenue - cost;
+    return {
+      locationId: l.id, name: l.name, orders: orders.length, revenue: round2(revenue), grossProfit: round2(gp),
+      marginPct: revenue ? Math.round((gp / revenue) * 1000) / 10 : 0, expenses: round2(expenses), netProfit: round2(gp - expenses),
+      stockValue: round2(stockValue), avgOrder: orders.length ? round2(revenue / orders.length) : 0,
+    };
+  }).sort((a, b) => b.revenue - a.revenue);
 }

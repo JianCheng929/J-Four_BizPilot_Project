@@ -1,5 +1,6 @@
 import { AgentPanel } from '@/components/bizpilot/AgentPanel';
 import { useState } from 'react';
+import { PrivacyTab } from '@/components/bizpilot/PrivacyTab';
 import { toast } from 'sonner';
 import { Headset, Loader2, MessageSquareReply, Plus, RefreshCw, Star, TriangleAlert, Users } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
@@ -245,6 +246,7 @@ export function Customers() {
           <TabsTrigger value="reviews">Reviews{stats.unresolved.length ? ` (${stats.unresolved.length})` : ''}</TabsTrigger>
           <TabsTrigger value="tickets">Support tickets{openTickets.length ? ` (${openTickets.length})` : ''}</TabsTrigger>
           <TabsTrigger value="retention">Customers &amp; retention</TabsTrigger>
+          <TabsTrigger value="privacy">Privacy (PDPA)</TabsTrigger>
         </TabsList>
 
         <TabsContent value="reviews" className="mt-4 space-y-4">
@@ -441,6 +443,7 @@ export function Customers() {
             </>
           )}
         </TabsContent>
+        <TabsContent value="privacy" className="mt-4"><PrivacyTab /></TabsContent>
       </Tabs>
       <ReviewDialog open={reviewOpen} onOpenChange={setReviewOpen} />
       <TicketDialog open={ticketOpen} onOpenChange={setTicketOpen} />

@@ -1,5 +1,5 @@
 import type { BizPilotDB, Product } from './db/types';
-import { cashFlowForecast, cashPosition, receivablesAgeing } from './metrics';
+import { budgetVsActual, cashFlowForecast, cashPosition, receivablesAgeing } from './metrics';
 import { expiringBatches, reorderSuggestions, transferSuggestions } from './ops';
 
 /**
@@ -201,6 +201,45 @@ Finish with notify_owner: what you prepared and what needs my approval.`,
     });
   }
 
+  // 9. Orders waiting on the shelf: start a pick run for staff.
+  const toPick = db.salesOrders
+    .filter((o) => o.status === 'awaiting_fulfilment' && !o.pickStatus && (o.paymentStatus === 'paid' || o.channel === 'retail'))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const picking = (db.staffTasks ?? []).some((t) => t.kind === 'pick' && (t.status === 'open' || t.status === 'in_progress') && toPick.some((o) => t.ref.includes(o.orderNumber)));
+  if (toPick.length && !picking) {
+    const oldestH = Math.floor((now - Date.parse(toPick[0].date)) / 3_600_000);
+    out.push({
+      key: `pick-${toPick[0].id}`,
+      pages: ['dashboard', 'inventory'],
+      severity: oldestH > 24 ? 'warning' : 'info',
+      title: `${toPick.length} paid order(s) waiting to be picked`,
+      evidence: `${toPick.slice(0, 5).map((o) => o.orderNumber).join(', ')}${toPick.length > 5 ? '…' : ''}; oldest ${oldestH} hour(s) ago.`,
+      action: 'Start a pick run',
+      prompt: `${toPick.length} paid orders are waiting to be picked (${toPick.map((o) => o.orderNumber).join(', ')}). Start a pick run with start_pick_run so staff get one pick list sorted by shelf/bin. If any product has no bin, say so. For online orders with an address, get courier quotes and request booking of the best option. Finish with notify_owner.`,
+      auto: true,
+    });
+  }
+
+  // 10. Spending over budget this month.
+  for (const r of budgetVsActual(db, new Date(now).toISOString().slice(0, 7), now).rows) {
+    if (!r.budget || (r.actual <= r.budget && r.projected <= r.budget * 1.1)) continue;
+    const over = r.actual > r.budget;
+    out.push({
+      key: `budget-${r.category}-${new Date(now).toISOString().slice(0, 7)}${over ? '-over' : ''}`.slice(0, 58),
+      pages: ['dashboard', 'finance'],
+      severity: over ? 'warning' : 'info',
+      title: over ? `${r.category} is over budget: ${rm(r.actual)} of ${rm(r.budget)}` : `${r.category} is heading over budget`,
+      evidence: `Spent ${rm(r.actual)} of ${rm(r.budget)} this month (${r.pct}%), on track for ${rm(r.projected)}.`,
+      action: 'Find savings',
+      prompt: `${r.category} spending is ${rm(r.actual)} against a ${rm(r.budget)} monthly budget (projected ${rm(r.projected)}). Look at the expenses in this category (list_expenses), find what drove it, and suggest concrete cuts or a better supplier with RM amounts. Do not change the budget yourself. Finish with notify_owner.`,
+      auto: true,
+    });
+  }
+
   const rank = { critical: 0, warning: 1, info: 2 };
-  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
+  // Items the owner cleared stay hidden for 30 days unless the situation changes (new key).
+  const cleared = s.dismissedSignals ?? {};
+  return out
+    .filter((x) => !(cleared[x.key] && now - Date.parse(cleared[x.key]) < 30 * DAY))
+    .sort((a, b) => rank[a.severity] - rank[b.severity]);
 }

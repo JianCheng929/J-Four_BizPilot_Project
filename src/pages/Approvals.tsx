@@ -27,6 +27,7 @@ const TYPE_LABEL: Record<ApprovalType, string> = {
   payment_reminder: 'Payment reminder',
   quotation_send: 'Quotation',
   campaign_launch: 'Ad campaign spend',
+  data_erasure: 'Erase customer data',
 };
 
 /** Live preview of the record an approval will change. */

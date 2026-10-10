@@ -18,6 +18,7 @@ import { generateImage } from '../lib/media.ts';
 import { finishKlingVideo, klingConfigured, startKlingVideo } from '../lib/kling.ts';
 import { injectionFlag, untrusted } from './untrusted.ts';
 import { detectSignals } from '../../../src/lib/signals.ts';
+import { verifyWork } from '../../../src/lib/verify.ts';
 import { deriveCustomers } from '../../../src/components/bizpilot/customers.ts';
 
 /**
@@ -50,7 +51,7 @@ function findLocation(db: BizPilotDB, ref: string | undefined) {
   return loc;
 }
 
-export function buildBizPilotServer(businessId: string, emit: Emit) {
+export function buildBizPilotServer(businessId: string, emit: Emit, startedAt = new Date().toISOString()) {
   const level = async () => (await readSnapshot(businessId)).settings.automationLevel;
 
   /** Wrap a handler: errors become tool errors the agent can read and recover from. */
@@ -429,7 +430,8 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
           days, total: r2(list.reduce((t, e) => t + e.amount, 0)), byCategory,
           recurringMonthly: r2(recurring.reduce((t, e) => t + e.amount, 0)),
           recurringItems: recurring.map((e) => ({ category: e.category, description: e.description, amount: e.amount })),
-          items: list.slice(0, 100).map((e) => ({ date: e.date, category: e.category, description: e.description, amount: e.amount, paid: e.paid, dueDate: e.dueDate ?? null, recurring: e.recurring })),
+          items: list.slice(0, 100).map((e) => ({ id: e.id, date: e.date, category: e.category, description: e.description, amount: e.amount, paid: e.paid, dueDate: e.dueDate ?? null, recurring: e.recurring, receipt: Boolean(e.receiptUrl), branch: e.locationId ? db.locations.find((l) => l.id === e.locationId)?.name ?? null : null })),
+          budgets: m.budgetVsActual(db).rows,
         };
       })),
 
@@ -668,9 +670,10 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       })),
 
     tool('add_expense', 'Record a business expense or an unpaid bill (paid=false with dueDate).',
-      { category: z.string(), description: z.string(), amount: z.number().positive(), date: z.string().optional(), paid: z.boolean().default(true), dueDate: z.string().optional(), recurring: z.boolean().default(false) },
-      write(async (a) => withBusiness(businessId, (db) => {
+      { category: z.string(), description: z.string(), amount: z.number().positive(), date: z.string().optional(), paid: z.boolean().default(true), dueDate: z.string().optional(), recurring: z.boolean().default(false), branch: z.string().optional().describe('Location name the cost belongs to; empty = whole business') },
+      write(async ({ branch, ...a }) => withBusiness(businessId, (db) => {
         const e = ops.addExpense(db, { ...a, date: a.date ?? new Date().toISOString(), dueDate: a.dueDate ?? null }, ACTOR);
+        if (branch) e.locationId = findLocation(db, branch)!.id;
         return { id: e.id, amount: e.amount };
       }))),
 
@@ -723,10 +726,13 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       { ticket: z.string(), status: z.enum(['open', 'in_progress', 'resolved']).optional(), notes: z.string().optional() },
       write(async ({ ticket, ...patch }) => withBusiness(businessId, (db) => ({ status: ops.updateTicket(db, ticket, patch, ACTOR).status })))),
 
-    tool('request_customer_email', 'Ask the owner to approve sending an email to a customer or supplier (sent from the business mailbox).',
-      { to: z.string(), subject: z.string(), body: z.string() },
-      write(async (a) => {
-        const req = await withBusiness(businessId, (db) => ops.requestApproval(db, { type: 'customer_message', title: `Email ${a.to}: ${a.subject}`, description: a.body, payload: a }, ACTOR));
+    tool('request_customer_email', 'Ask the owner to approve sending an email to a customer or supplier (sent from the business mailbox). purpose=marketing (promotions, offers, newsletters) needs the customer\'s recorded consent (PDPA); service = orders, invoices, support, supplier business.',
+      { to: z.string(), subject: z.string(), body: z.string(), purpose: z.enum(['service', 'marketing']).default('service') },
+      write(async ({ purpose, ...a }) => {
+        const req = await withBusiness(businessId, (db) => {
+          if (purpose === 'marketing') ops.assertMarketingConsent(db, a.to, 'email');
+          return ops.requestApproval(db, { type: 'customer_message', title: `Email ${a.to}: ${a.subject}`, description: a.body, payload: { ...a, purpose } }, ACTOR);
+        });
         return afterApproval(req);
       })),
 
@@ -840,6 +846,13 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       write(async (a) => withBusiness(businessId, (db) => ({ id: ops.addCampaign(db, a, ACTOR).id })))),
 
     // ------------------------------------------------------------ everything else the owner can do in the app
+    tool('verify_work', 'Quality check of everything the agent team created or changed in this run: product prices and margins, purchase orders (supplier, lines, total, cash), invoices and quotations (totals, customer, dates), sales orders, marketing drafts (complete, compliant, no placeholders), plus the approvals waiting. Run it before the final summary; fix every error it lists and run it again.', {},
+      safe(async () => {
+        const v = verifyWork(await readSnapshot(businessId), startedAt, ACTOR);
+        emit({ kind: 'artifact', text: v.passed ? `Quality check passed: ${v.checked} item(s) checked${v.warnings ? `, ${v.warnings} warning(s)` : ''}` : `Quality check found ${v.errors} problem(s) to fix`, data: { verification: { passed: v.passed, errors: v.errors, warnings: v.warnings, checked: v.checked } } });
+        return v;
+      })),
+
     tool('get_signals', 'What needs attention right now, worked out from the real records: stock that is not selling, missing costs, low cash, late invoices, stock running out, expiring batches, unanswered bad reviews, slow movers. Each has evidence and a suggested action. Use it to decide what to do next.', {},
       safe(async () => detectSignals(await readSnapshot(businessId)).map(({ key, severity, title, evidence, action, auto }) => ({ key, severity, title, evidence, action, actByYourself: auto })))),
 
@@ -981,6 +994,87 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       write(async ({ campaign, ...patch }) => {
         const out = await withBusiness(businessId, (db) => ops.updateCampaign(db, campaign, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), ACTOR));
         return out.approval ? { campaign: out.campaign.name, ...(await afterApproval(out.approval)) } : { campaign: out.campaign.name, status: out.campaign.status };
+      })),
+
+    // ------------------------------------------------------------ warehouse (bins, pick & pack, staff tasks)
+    tool('set_bin', 'Record the shelf/bin where a product is kept (e.g. A-01-03), optionally per location. Pick lists are sorted by bin.',
+      { product: z.string(), bin: z.string().describe('Bin code; empty clears it'), location: z.string().optional() },
+      write(async ({ product, bin, location }) => withBusiness(businessId, (db) => {
+        const p = ops.setBin(db, ops.requireProduct(db, product).id, findLocation(db, location)?.id ?? null, bin, ACTOR);
+        return { sku: p.sku, bins: p.bins };
+      }))),
+
+    tool('get_pick_list', 'Orders waiting to be picked and the pick list sorted by bin (what to take from which shelf).', { orders: z.array(z.string()).optional() },
+      safe(async ({ orders }) => {
+        const db = await readSnapshot(businessId);
+        const r = ops.pickList(db, orders);
+        return { orders: r.orders.map((o) => ({ orderNumber: o.orderNumber, pickStatus: o.pickStatus ?? 'waiting', paid: o.paymentStatus, channel: o.channel })), lines: r.lines.map((l) => ({ bin: l.bin || null, sku: l.product.sku, product: l.product.name, quantity: l.quantity, onHand: l.product.stock, orders: l.orders })) };
+      })),
+
+    tool('start_pick_run', 'Start picking: the waiting orders (or the ones given) move to "picking" and a pick task with the shelf-by-shelf list is created for staff.',
+      { orders: z.array(z.string()).optional(), assignee: z.string().optional().describe('Staff email') },
+      write(async ({ orders, assignee }) => withBusiness(businessId, (db) => {
+        const r = ops.startPickRun(db, orders, ACTOR, assignee);
+        emit({ kind: 'artifact', text: `Pick run ${r.task.taskNumber}: ${r.orders.length} order(s)` });
+        return { task: r.task.taskNumber, orders: r.orders.map((o) => o.orderNumber), list: r.task.detail };
+      }))),
+
+    tool('pack_order', 'Record an order as picked or packed (only when staff confirm it). Packed orders are ready for the courier or counter; use fulfil_order when handed over.',
+      { order: z.string(), step: z.enum(['picked', 'packed']) },
+      write(async ({ order, step }) => withBusiness(businessId, (db) => {
+        const o = step === 'picked' ? ops.markPicked(db, order, ACTOR) : ops.markPacked(db, order, ACTOR);
+        return { orderNumber: o.orderNumber, pickStatus: o.pickStatus };
+      }))),
+
+    tool('list_staff_tasks', 'Staff tasks (pick, pack, put away, count, receive, deliver, other), open ones first.', { status: z.enum(['open', 'in_progress', 'done', 'cancelled']).optional() },
+      safe(async ({ status }) => {
+        const db = await readSnapshot(businessId);
+        const list = (db.staffTasks ?? []).filter((t) => (status ? t.status === status : t.status === 'open' || t.status === 'in_progress'));
+        return list.slice(0, 100).map((t) => ({ task: t.taskNumber, kind: t.kind, title: t.title, detail: t.detail.slice(0, 600), assignee: t.assignee || 'anyone', location: db.locations.find((l) => l.id === t.locationId)?.name ?? null, ref: t.ref, due: t.dueDate, status: t.status }));
+      })),
+
+    tool('create_staff_task', 'Give staff a job (put away stock, deliver an order, clean up a shelf, prepare a display…). Receive, count and pick tasks are created automatically by the matching records.',
+      { title: z.string(), detail: z.string().optional(), kind: z.enum(['pick', 'pack', 'put_away', 'count', 'receive', 'deliver', 'other']).default('other'), assignee: z.string().optional(), location: z.string().optional(), ref: z.string().optional(), dueDate: z.string().optional() },
+      write(async ({ location, ...a }) => withBusiness(businessId, (db) => {
+        const t = ops.addStaffTask(db, { ...a, locationId: findLocation(db, location)?.id ?? '' }, ACTOR);
+        return { task: t.taskNumber };
+      }))),
+
+    tool('update_staff_task', 'Reassign, reschedule, start, finish or cancel a staff task.',
+      { task: z.string(), status: z.enum(['open', 'in_progress', 'done', 'cancelled']).optional(), assignee: z.string().optional(), dueDate: z.string().optional() },
+      write(async ({ task, ...patch }) => withBusiness(businessId, (db) => {
+        const t = ops.updateStaffTask(db, task, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), ACTOR);
+        return { task: t.taskNumber, status: t.status };
+      }))),
+
+    // ------------------------------------------------------------ budgets & branches
+    tool('set_budget', 'Set a monthly spending budget for an expense category (0 removes it). Only when the owner gives the amount or approves your proposal.',
+      { category: z.string(), monthly: z.number().nonnegative() },
+      write(async ({ category, monthly }) => withBusiness(businessId, (db) => ops.setBudget(db, category, monthly, ACTOR)))),
+
+    tool('get_budget_vs_actual', 'Budget vs actual spending per category for a month (default this month), with a month-end projection.', { month: z.string().optional().describe('YYYY-MM') },
+      safe(async ({ month }) => m.budgetVsActual(await readSnapshot(businessId), month))),
+
+    tool('compare_branches', 'Compare locations over the last N days: orders, revenue, gross profit and margin, costs booked to the branch, net profit, stock value, average order.', { days: z.number().int().min(1).max(366).default(30) },
+      safe(async ({ days }) => ops.branchComparison(await readSnapshot(businessId), days))),
+
+    // ------------------------------------------------------------ PDPA
+    tool('record_consent', 'Record that a customer gave or withdrew consent to be contacted (PDPA). Only when the customer actually said so; give how (counter sign-up, website form, WhatsApp reply…).',
+      { customerName: z.string().optional(), email: z.string().optional(), phone: z.string().optional(), purpose: z.enum(['marketing', 'service']).default('marketing'), channel: z.enum(['email', 'whatsapp', 'sms', 'any']).default('any'), status: z.enum(['granted', 'withdrawn']), source: z.string(), note: z.string().optional() },
+      write(async (a) => withBusiness(businessId, (db) => { const c = ops.recordConsent(db, a, ACTOR); return { customer: c.customerKey, purpose: c.purpose, status: c.status }; }))),
+
+    tool('check_consent', 'Can this customer receive marketing (or service) messages? Returns the latest consent record.',
+      { customer: z.string().describe('Email or phone'), purpose: z.enum(['marketing', 'service']).default('marketing'), channel: z.enum(['email', 'whatsapp', 'sms', 'any']).optional() },
+      safe(async ({ customer, purpose, channel }) => {
+        const c = ops.consentStatus(await readSnapshot(businessId), customer, purpose, channel);
+        return c ? { allowed: c.status === 'granted', status: c.status, source: c.source, at: c.at, channel: c.channel } : { allowed: purpose === 'service', status: 'none recorded' };
+      })),
+
+    tool('customer_data_request', 'Handle a PDPA request from a customer: export = everything BizPilot holds about them; erase = remove their personal data (goes to the owner for approval, cannot be undone).',
+      { customer: z.string().describe('Email, phone or exact name'), action: z.enum(['export', 'erase']), reason: z.string().optional() },
+      write(async ({ customer, action, reason }) => {
+        if (action === 'export') return ops.customerDataExport(await readSnapshot(businessId), customer);
+        return afterApproval(await withBusiness(businessId, (db) => ops.requestDataErasure(db, customer, reason || 'Customer asked to delete their data', ACTOR)));
       })),
 
     tool('notify_owner', 'Send the owner an in-app notification (e.g. a daily briefing or an urgent risk).',

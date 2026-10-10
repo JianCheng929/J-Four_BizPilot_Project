@@ -10,6 +10,8 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { EmptyState, SectionCard, SimpleSelect, StatusPill, primaryBtn } from './common';
+import { ScanInput } from './BarcodeScanner';
+import { toast } from 'sonner';
 
 const ALL = '__all__';
 
@@ -108,6 +110,16 @@ function CountSheet({ count, where, onClose }: { count: StockCount; where: strin
     if (done) onClose();
   };
   const entered = Object.values(values).filter((v) => v !== '').length;
+  // Each scan adds one unit of that product to its count.
+  const scan = (code: string) => {
+    const p = ops.findByCode(db, code);
+    const line = p && count.lines.find((l) => l.productId === p.id);
+    if (!p || !line) return toast.error(p ? `${p.name} is not on this count.` : `No product with code "${code}".`);
+    const n = (Number(values[p.id]) || 0) + 1;
+    setValues((s) => ({ ...s, [p.id]: String(n) }));
+    run((d) => ops.recordCount(d, count.id, p.id, n));
+    toast.success(`${p.name}: ${n}`);
+  };
   return (
     <SectionCard
       title={`${count.countNumber} · ${where}`}
@@ -115,11 +127,12 @@ function CountSheet({ count, where, onClose }: { count: StockCount; where: strin
       actions={
         <>
           <Input className="h-8 w-48" placeholder="Find product or scan barcode" value={q} onChange={(e) => setQ(e.target.value)} />
-          <Button size="sm" variant="ghost" onClick={() => window.confirm(`Cancel ${count.countNumber}?`) && run((d, a) => { const c = d.stockCounts.find((x) => x.id === count.id); if (c) c.status = 'cancelled'; ops.audit(d, a, 'cancel', 'stock_count', count.countNumber, `${count.countNumber} cancelled`); return true; }, 'Count cancelled') && onClose()}><X className="mr-1 h-4 w-4" /> Cancel count</Button>
+          <Button size="sm" variant="ghost" onClick={() => window.confirm(`Cancel ${count.countNumber}?`) && run((d, a) => { ops.cancelStockCount(d, count.id, a); return true; }, 'Count cancelled') && onClose()}><X className="mr-1 h-4 w-4" /> Cancel count</Button>
           <Button size="sm" className={primaryBtn} disabled={!entered} onClick={submit}><Send className="mr-1 h-4 w-4" /> Submit count</Button>
         </>
       }
     >
+      <ScanInput onScan={scan} placeholder="Scan each item: every scan adds 1" className="mb-3 max-w-md" />
       <Table>
         <TableHeader>
           <TableRow>

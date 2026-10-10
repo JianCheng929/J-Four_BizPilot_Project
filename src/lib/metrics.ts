@@ -574,3 +574,30 @@ export function payablesAgeing(db: BizPilotDB, asOf = Date.now()): Ageing<Expens
   const open = db.expenses.filter((e) => !e.paid);
   return age(open, (e) => e.description || e.category, (e) => e.dueDate || e.date, (e) => e.amount, asOf);
 }
+
+export interface BudgetRow { category: string; budget: number; actual: number; left: number; pct: number | null; projected: number }
+
+/** Blueprint D: budget vs actual for one month ('YYYY-MM'), with a straight-line month-end projection. */
+export function budgetVsActual(db: BizPilotDB, month = new Date().toISOString().slice(0, 7), now = Date.now()): { month: string; rows: BudgetRow[]; budget: number; actual: number } {
+  const budgets = db.settings.budgets ?? {};
+  const spent = new Map<string, number>();
+  for (const e of db.expenses) {
+    if (!e.date || e.date.slice(0, 7) !== month) continue;
+    spent.set(e.category, (spent.get(e.category) ?? 0) + e.amount);
+  }
+  const [y, m] = month.split('-').map(Number);
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const today = new Date(now);
+  const isCurrent = today.toISOString().slice(0, 7) === month;
+  const elapsed = isCurrent ? Math.max(1, today.getUTCDate()) : daysInMonth;
+  const cats = new Set([...Object.keys(budgets), ...spent.keys()]);
+  const rows = [...cats].map((category) => {
+    const budget = budgets[category] ?? 0;
+    const actual = Math.round((spent.get(category) ?? 0) * 100) / 100;
+    // Repeating costs land once a month, so only project the variable part.
+    const repeating = db.expenses.filter((e) => e.category === category && e.recurring && e.date?.slice(0, 7) === month).reduce((s, e) => s + e.amount, 0);
+    const projected = Math.round((repeating + ((actual - repeating) / elapsed) * daysInMonth) * 100) / 100;
+    return { category, budget, actual, left: Math.round((budget - actual) * 100) / 100, pct: budget ? Math.round((actual / budget) * 100) : null, projected };
+  }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || b.actual - a.actual);
+  return { month, rows, budget: rows.reduce((s, r) => s + r.budget, 0), actual: rows.reduce((s, r) => s + r.actual, 0) };
+}

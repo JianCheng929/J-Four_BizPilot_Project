@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { CheckCircle2, Loader2, Sparkles } from 'lucide-react';
+import { CheckCircle2, Loader2, Sparkles, X } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
 import { post } from '@/lib/api';
+import * as ops from '@/lib/ops';
 import { detectSignals, signalChatId, type Signal, type SignalPage } from '@/lib/signals';
 import type { AgentTask } from '@/lib/db/types';
 import { Button } from '@/components/ui/button';
@@ -24,7 +25,7 @@ function stateOf(tasks: AgentTask[], sig: Signal) {
  * (server/src/lib/reactor.ts); the button runs one straight away.
  */
 export function AgentPanel({ page, className }: { page: SignalPage; className?: string }) {
-  const { db, reload } = useBizPilot();
+  const { db, reload, run, can } = useBizPilot();
   const [nowMs] = useState(() => Date.now());
   const [starting, setStarting] = useState<string | null>(null);
   let signals: Signal[] = [];
@@ -82,6 +83,13 @@ export function AgentPanel({ page, className }: { page: SignalPage; className?: 
                 )}
                 {(st === 'new' || st === 'failed') && busy && <div className="mt-0.5 text-right text-[11px] text-slate-400">after the current task</div>}
               </div>
+              {can.write && st !== 'working' && (
+                <Button
+                  size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0 text-slate-400 hover:text-slate-700"
+                  title={st === 'done' ? 'Clear: I have seen this' : 'Dismiss'} aria-label="Dismiss"
+                  onClick={() => run((d, a) => ops.dismissSignal(d, sig.key, a), st === 'done' ? 'Cleared' : 'Dismissed for 30 days')}
+                ><X className="h-4 w-4" /></Button>
+              )}
             </div>
           );
         })}

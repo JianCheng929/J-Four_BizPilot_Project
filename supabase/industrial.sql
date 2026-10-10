@@ -15,6 +15,7 @@
 --   6. Manufacturing: recipes (bill of materials) and production orders.
 --   7. Quotations, payment reminders and repeating invoices.
 --   8. Product variants and batch / expiry tracking.
+--   9. Warehouse bins, pick and pack, staff tasks; receipts and branch costs; PDPA consent records and backups.
 -- ============================================================
 
 -- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
@@ -139,6 +140,68 @@ alter table products add column if not exists variant_options jsonb;
 alter table stock_movements add column if not exists batch text;
 create index if not exists idx_products_parent on products (business_id, parent_id);
 
+-- Warehouse, finance extras, PDPA (blueprint §5 A3, §8 D, §17) -------------------------
+alter table products add column if not exists bins jsonb;
+alter table sales_orders add column if not exists pick_status text;
+alter table sales_orders add column if not exists picked_at timestamptz;
+alter table sales_orders add column if not exists packed_at timestamptz;
+alter table sales_orders add column if not exists packed_by text;
+alter table expenses add column if not exists receipt_url text;
+alter table expenses add column if not exists location_id text;
+create table if not exists staff_tasks (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  task_number text not null,
+  title text not null,
+  detail text default '',
+  kind text default 'other' check (kind in ('pick','pack','put_away','count','receive','deliver','other')),
+  assignee text default '',
+  location_id text default '',
+  ref text default '',
+  due_date timestamptz,
+  status text default 'open' check (status in ('open','in_progress','done','cancelled')),
+  created_at timestamptz default now(),
+  completed_at timestamptz,
+  created_by text default '',
+  done_by text default '',
+  unique (business_id, task_number)
+);
+create table if not exists consents (
+  id text primary key default gen_random_uuid()::text,
+  business_id uuid not null references businesses (id) on delete cascade,
+  customer_key text not null,
+  customer_name text default '',
+  email text default '',
+  phone text default '',
+  purpose text not null check (purpose in ('marketing','service')),
+  channel text default 'any' check (channel in ('email','whatsapp','sms','any')),
+  status text not null check (status in ('granted','withdrawn')),
+  source text default '',
+  note text default '',
+  at timestamptz default now(),
+  recorded_by text default ''
+);
+create index if not exists idx_tasks_biz on staff_tasks (business_id, created_at desc);
+create index if not exists idx_consents_biz on consents (business_id, customer_key, at desc);
+
+-- Receipts: private files, members of the business only (folder = business id).
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('receipts', 'receipts', false, 10485760)
+on conflict (id) do nothing;
+drop policy if exists "receipts read" on storage.objects;
+create policy "receipts read" on storage.objects for select to authenticated
+  using (bucket_id = 'receipts' and public.is_business_owner(((storage.foldername(name))[1])::uuid));
+drop policy if exists "receipts upload" on storage.objects;
+create policy "receipts upload" on storage.objects for insert to authenticated
+  with check (bucket_id = 'receipts' and public.is_business_owner(((storage.foldername(name))[1])::uuid));
+drop policy if exists "receipts delete" on storage.objects;
+create policy "receipts delete" on storage.objects for delete to authenticated
+  using (bucket_id = 'receipts' and public.is_business_owner(((storage.foldername(name))[1])::uuid));
+-- Daily backups: written and read by the BizPilot server only (no policies = no browser access).
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('backups', 'backups', false, 52428800)
+on conflict (id) do nothing;
+
 -- 1. Team members ------------------------------------------------------------------
 create table if not exists business_members (
   id uuid primary key default gen_random_uuid(),
@@ -153,10 +216,19 @@ create table if not exists business_members (
 );
 create unique index if not exists business_members_user_idx on business_members (user_id) where user_id is not null;
 
+-- Two-step login (blueprint §17): a user who turned it on must have entered their
+-- code in this session (token level aal2) before any business data is readable or writable.
+create or replace function mfa_ok() returns boolean
+language sql security definer stable set search_path = public, auth as $$
+  select coalesce(auth.jwt() ->> 'aal', 'aal1') = 'aal2'
+      or not exists (select 1 from auth.mfa_factors f where f.user_id = auth.uid() and f.status = 'verified');
+$$;
+
 -- The signed-in user's role in a business: owner, manager, staff, viewer or null.
 create or replace function business_role(bid uuid) returns text
 language sql security definer stable set search_path = public as $$
   select case
+    when not mfa_ok() then null
     when exists (select 1 from businesses where id = bid and owner_id = auth.uid()) then 'owner'
     else (select role from business_members where business_id = bid and user_id = auth.uid())
   end;
@@ -214,10 +286,10 @@ drop policy if exists "members read business" on businesses;
 drop policy if exists "owner creates business" on businesses;
 drop policy if exists "managers edit business" on businesses;
 drop policy if exists "owner deletes business" on businesses;
-create policy "members read business" on businesses for select using (owner_id = auth.uid() or is_business_owner(id));
+create policy "members read business" on businesses for select using ((owner_id = auth.uid() and mfa_ok()) or is_business_owner(id));
 create policy "owner creates business" on businesses for insert with check (owner_id = auth.uid());
 create policy "managers edit business" on businesses for update using (can_manage_business(id)) with check (can_manage_business(id));
-create policy "owner deletes business" on businesses for delete using (owner_id = auth.uid());
+create policy "owner deletes business" on businesses for delete using (owner_id = auth.uid() and mfa_ok());
 
 create or replace function guard_business_owner() returns trigger language plpgsql as $$
 begin
@@ -234,7 +306,7 @@ begin
   foreach t in array array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations','staff_tasks','consents'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -265,7 +337,7 @@ begin
   foreach t in array array[
     'businesses','products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations'
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations','staff_tasks','consents'
   ]
   loop
     execute format('alter table %I add column if not exists row_version int not null default 0', t);
@@ -327,7 +399,7 @@ declare
   allowed constant text[] := array[
     'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
     'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
-    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations'];
+    'audit_log','notifications','agent_tasks','return_cases','locations','stock_transfers','stock_counts','production_orders','quotations','staff_tasks','consents'];
   c jsonb;
   tbl text;
   op text;

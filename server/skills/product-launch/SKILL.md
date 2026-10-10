@@ -12,6 +12,19 @@ summary of what is done and what is waiting for approval.
 Work fast: call independent tools in parallel, keep web research short (about 3–5
 searches and 3–6 page fetches in total), and don't explain your reasoning between steps.
 
+## Running it with the agent team (when you lead the team)
+
+Split the launch across the team and run independent parts at the same time:
+1. Wave 1, in parallel: `research-agent` does steps 1–2 (suppliers saved with
+   `create_supplier`, market prices) and the courier rates of step 6; you do step 0.
+2. Wave 2: `inventory-agent` does steps 3–5 with the research report in its brief
+   (pricing, products with listing copy, first-stock PO for approval).
+3. Wave 3, in parallel: `marketing-agent` does step 8 (launch post with an image) and
+   `finance-agent` does step 7 (break-even and cash check), each given the SKUs, prices
+   and costs from wave 2.
+4. `qa-agent` checks everything against this list of deliverables; fix what it reports.
+5. You do steps 9–10.
+
 ## 0. Context (one parallel batch)
 
 Call `get_business_overview`, `get_business_profile`, `list_products` and

@@ -57,6 +57,10 @@ export interface BusinessSettings {
   defaultTaxRate: number; // % SST applied on invoices, 0 if not registered
   invoicePrefix: string;
   targetMarginPct: number; // gross margin the owner aims for, used for margin alerts
+  dismissedSignals?: Record<string, string>; // "BizPilot noticed" items the owner cleared: key -> ISO time (hidden 30 days)
+  budgets?: Record<string, number>; // monthly spending budget per expense category, RM
+  privacyNotice?: string; // PDPA privacy notice shown to customers
+  dataRetentionMonths?: number; // keep customer personal data this long after their last order
 }
 
 export interface Product {
@@ -100,6 +104,7 @@ export interface Product {
   /** Labour and overhead per unit made, added to material cost for the production cost. */
   labourCost?: number;
   overheadCost?: number;
+  bins?: Record<string, string>; // shelf/bin code per location id ('' = default location), e.g. A-01-03
 }
 
 export interface StockBatch {
@@ -303,6 +308,10 @@ export interface SalesOrder {
   shipment: Shipment | null;
   invoiceId: string | null;
   locationId?: string | null; // shop or warehouse the goods leave from; default location if empty
+  pickStatus?: 'picking' | 'picked' | 'packed' | null; // warehouse progress before handover
+  pickedAt?: string | null;
+  packedAt?: string | null;
+  packedBy?: string;
 }
 
 export interface Expense {
@@ -314,6 +323,42 @@ export interface Expense {
   recurring: boolean;
   dueDate?: string | null; // for unpaid bills
   paid: boolean;
+  receiptUrl?: string; // storage path of the receipt photo/PDF (private bucket "receipts")
+  locationId?: string | null; // branch the cost belongs to (for branch comparison)
+}
+
+/** Work for a person (blueprint §5 A3 warehouse tasks): pick, pack, put away, count, receive. */
+export interface StaffTask {
+  id: string;
+  taskNumber: string;
+  title: string;
+  detail: string;
+  kind: 'pick' | 'pack' | 'put_away' | 'count' | 'receive' | 'deliver' | 'other';
+  assignee: string; // team member email, '' = anyone
+  locationId: string;
+  ref: string; // related document numbers, e.g. "SO-00012, SO-00013"
+  dueDate: string | null;
+  status: 'open' | 'in_progress' | 'done' | 'cancelled';
+  createdAt: string;
+  completedAt: string | null;
+  createdBy: string;
+  doneBy: string;
+}
+
+/** PDPA 2010: a customer's consent to be contacted (blueprint §17). */
+export interface Consent {
+  id: string;
+  customerKey: string; // lowercased email, else phone digits
+  customerName: string;
+  email: string;
+  phone: string;
+  purpose: 'marketing' | 'service';
+  channel: 'email' | 'whatsapp' | 'sms' | 'any';
+  status: 'granted' | 'withdrawn';
+  source: string; // how it was collected: counter, website form, WhatsApp, verbal…
+  note: string;
+  at: string;
+  recordedBy: string;
 }
 
 export type InvoiceStatus = 'draft' | 'issued' | 'paid' | 'overdue' | 'cancelled';
@@ -485,7 +530,8 @@ export type ApprovalType =
   | 'production_order'
   | 'payment_reminder'
   | 'quotation_send'
-  | 'campaign_launch';
+  | 'campaign_launch'
+  | 'data_erasure';
 
 export interface ApprovalRequest {
   id: string;
@@ -589,6 +635,8 @@ export interface BizPilotDB {
   stockCounts: StockCount[];
   productionOrders: ProductionOrder[];
   quotations: Quotation[];
+  staffTasks: StaffTask[];
+  consents: Consent[];
   approvals: ApprovalRequest[];
   auditLog: AuditLogEntry[];
   notifications: AppNotification[];

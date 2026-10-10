@@ -15,6 +15,8 @@ import { agent } from './routes/agent.ts';
 import { pos, tokens } from './routes/pos.ts';
 import { admin } from './routes/admin.ts';
 import { media } from './routes/media.ts';
+import { backups } from './routes/backups.ts';
+import { startBackups } from './lib/backup.ts';
 import { startAutopilot } from './lib/autopilot.ts';
 import { startReactor } from './lib/reactor.ts';
 import { rateLimit } from './lib/ratelimit.ts';
@@ -49,6 +51,7 @@ app.use('/api/agent', agent);
 app.use('/api/tokens', tokens);
 app.use('/api/pos', pos);
 app.use('/api/media', media);
+app.use('/api/backups', backups);
 app.use('/admin', admin);
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
@@ -80,4 +83,5 @@ app.listen(PORT, async () => {
   startAutopilot();
   startBilling();
   startReactor();
+  startBackups();
 });

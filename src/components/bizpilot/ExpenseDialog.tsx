@@ -34,7 +34,8 @@ export function ExpenseDialog({
   onOpenChange: (o: boolean) => void;
   expense?: Expense | null;
 }) {
-  const { run } = useBizPilot();
+  const { run, db } = useBizPilot();
+  const [branch, setBranch] = useState('');
   const [category, setCategory] = useState('Other');
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
@@ -54,6 +55,7 @@ export function ExpenseDialog({
     setRecurring(expense?.recurring ?? false);
     setUnpaid(expense ? !expense.paid : false);
     setDueDate(expense?.dueDate ? toDateInput(expense.dueDate) : '');
+    setBranch(expense?.locationId ?? '');
   }, [open, expense]);
 
   const save = () => {
@@ -70,6 +72,8 @@ export function ExpenseDialog({
       recurring,
       paid: !unpaid,
       dueDate: unpaid ? fromDateInput(dueDate) : null,
+      // Only written when branches are in use, so databases without the column still save.
+      ...(branch || expense?.locationId ? { locationId: branch || null } : {}),
     };
     const res = expense
       ? run((d, a) => {
@@ -114,6 +118,11 @@ export function ExpenseDialog({
               Not paid yet (bill)
             </Label>
           </div>
+          {db.locations.length > 1 && (
+            <Field label="Branch" className="col-span-2">
+              <SimpleSelect value={branch || '__all'} onChange={(v) => setBranch(v === '__all' ? '' : v)} options={[{ value: '__all', label: 'Whole business (shared cost)' }, ...db.locations.map((l) => ({ value: l.id, label: l.name }))]} />
+            </Field>
+          )}
           {unpaid && (
             <Field label="Due date">
               <Input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />

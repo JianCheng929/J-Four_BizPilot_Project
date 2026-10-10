@@ -29,6 +29,15 @@ export async function businessForUser(userId: string): Promise<(BusinessRow & { 
   return b.data ? { ...(b.data as BusinessRow), role: m.data.role as TeamRole } : null;
 }
 
+/** Assurance level in a Supabase access token: aal1 = password only, aal2 = password + two-step code. */
+function tokenAal(token: string): string {
+  try {
+    return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')).aal ?? 'aal1';
+  } catch {
+    return 'aal1';
+  }
+}
+
 /** Verifies the Supabase access token sent by the web app and loads the user's business. */
 export async function requireUser(req: Request, res: Response, next: NextFunction) {
   try {
@@ -36,6 +45,10 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
     if (!token) return res.status(401).json({ error: 'Sign in first.' });
     const { data, error } = await supabaseAdmin().auth.getUser(token);
     if (error || !data.user) return res.status(401).json({ error: 'Your session expired. Sign in again.' });
+    // Two-step login: once turned on, the session must have passed the code check (aal2).
+    if (data.user.factors?.some((f) => f.status === 'verified') && tokenAal(token) !== 'aal2') {
+      return res.status(401).json({ error: 'Enter your two-step login code first.' });
+    }
     const business = await businessForUser(data.user.id);
     if (!business) return res.status(400).json({ error: 'Finish onboarding first.' });
     req.ctx = { userId: data.user.id, email: data.user.email ?? data.user.id, role: business.role, business };

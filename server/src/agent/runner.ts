@@ -6,6 +6,7 @@ import { supabaseAdmin } from '../lib/supabase.ts';
 import { readSnapshot } from '../lib/workspace.ts';
 import { buildBizPilotServer } from './tools.ts';
 import { skillsIndex } from './skills.ts';
+import { labelOf, teamAgents, teamIndex } from './team.ts';
 import { cliPath, environment, rememberAccount, reportRun, restoreLogin, runtimeEnv, sandboxDir, withRuntime } from './workbuddy.ts';
 
 /**
@@ -23,6 +24,9 @@ interface Live {
 const live = new Map<string, Live>();
 
 const WEB_TOOLS = ['WebSearch', 'WebFetch'];
+/** WorkBuddy's sub-agent tool (named Agent; Task in older runtimes). */
+const AGENT_TOOLS = ['Agent', 'Task'];
+const multiAgent = () => process.env.WORKBUDDY_TEAM !== 'off';
 
 const SYSTEM_PROMPT = (biz: { name: string; mode: string; level: number; limit: number; voice: string; audience: string; banned: string }) => `
 You are BizPilot's operations agent for "${biz.name}", a Malaysian SME (${biz.mode} business, currency RM, timezone Asia/Kuala_Lumpur).
@@ -61,6 +65,17 @@ How to work:
 5. Automation level is ${biz.level} (1 = suggest only, 2 = draft and ask for approval, 3 = low-risk routine actions may auto-execute). Approval limit RM${biz.limit}.
 6. Brand voice: ${biz.voice || 'friendly, clear, professional'}. Audience: ${biz.audience || 'Malaysian customers'}. Never use these claims: ${biz.banned || 'none set'}. Reply to customers in the language they wrote in (English, Malay or Chinese).
 7. ${skillsIndex()}
+${multiAgent() ? `
+You lead BizPilot's agent team (WorkBuddy sub-agents). Each member is a specialist with its own skills and tools:
+${teamIndex()}
+How to lead the team:
+- A quick question or a single action: do it yourself, don't delegate (speed matters).
+- A goal that touches two or more areas (launching a product, restocking and promoting, month-end, a weekly review): call share_plan with each step marked by the agent that owns it, e.g. "1. [research-agent] find suppliers and market prices".
+- Run independent steps IN PARALLEL: call the Agent tool several times in ONE message, one per member (subagent_type = the member's name). Run dependent steps after the step they need (research -> inventory creates priced products -> marketing and finance in parallel).
+- Each brief must stand alone: the goal, the facts and record ids from earlier steps (supplier ids, SKUs, prices), and exactly what to deliver.
+- Read each member's report. If a member reports PROBLEMS or a step failed, retry once with a corrected brief, give it to another member, or do it yourself.
+- ALWAYS finish a multi-step goal by running qa-agent with the list of what was supposed to be delivered. If it reports FAILED, have the right member fix it and run qa-agent again (at most twice). Only then write the summary, and say the quality check passed (or what is still open).
+` : ''}
 8. Finish with a concise summary for the owner: what you found (with the real figures), what you did (record numbers), and which approvals are waiting for them. Use plain language, no markdown tables.
 
 ${UNTRUSTED_RULES}
@@ -86,7 +101,7 @@ async function flush(l: Live) {
 }
 
 const friendly = (name: string) =>
-  name === 'WebSearch' ? 'web search' : name === 'WebFetch' ? 'web page reader' : name.replace(/^mcp__bizpilot__/, '').replace(/_/g, ' ');
+  AGENT_TOOLS.includes(name) ? 'team member' : name === 'WebSearch' ? 'web search' : name === 'WebFetch' ? 'web page reader' : name.replace(/^mcp__bizpilot__/, '').replace(/_/g, ' ');
 
 function toolResultText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -148,7 +163,15 @@ async function run(l: Live) {
     await restoreLogin().catch(() => false); // a goal sent right after a restart
     const db = await readSnapshot(businessId);
     const s = db.settings;
-    const { server, toolNames } = buildBizPilotServer(businessId, (e) => push(l, e));
+    const { server, toolNames } = buildBizPilotServer(businessId, (e) => push(l, e), task.createdAt);
+    const team = multiAgent() ? teamAgents(toolNames, WEB_TOOLS) : undefined;
+    const env = runtimeEnv();
+    if (team) {
+      env.CODEBUDDY_DISABLE_BUILTIN_SUBAGENTS = '1'; // only BizPilot's team, no coding agents
+      env.CODEBUDDY_SUBAGENT_TIMEOUT_MS ||= '420000'; // a stuck member hands back to the lead instead of hanging
+    }
+    /** Lead's Agent tool call id -> member name, to label each member's steps. */
+    const members = new Map<string, string>();
     const q = query({
       prompt: l.history
         ? `This continues an earlier conversation with the owner. Earlier messages, oldest first:\n\n${l.history}\n\n---\nThe owner's new message (answer this; "this", "it" or "yes" refer to the conversation above):\n${task.prompt}`
@@ -156,7 +179,7 @@ async function run(l: Live) {
       options: {
         environment,
         pathToCodebuddyCode: cliPath(),
-        env: runtimeEnv(),
+        env,
         cwd: sandboxDir(),
         model: process.env.WORKBUDDY_MODEL || undefined,
         // Fast by default: act with tools instead of long hidden reasoning.
@@ -164,10 +187,11 @@ async function run(l: Live) {
         effort: (process.env.WORKBUDDY_EFFORT || 'low') as 'low',
         abortController: l.abort,
         mcpServers: { bizpilot: server },
-        tools: WEB_TOOLS, // web research only: no shell or file access on the server
-        allowedTools: [...toolNames, ...WEB_TOOLS],
+        tools: team ? [...WEB_TOOLS, ...AGENT_TOOLS] : WEB_TOOLS, // web research and the team only: no shell or file access on the server
+        allowedTools: [...toolNames, ...WEB_TOOLS, ...(team ? AGENT_TOOLS : [])],
+        ...(team ? { agents: team } : {}),
         canUseTool: async (toolName: string, input: Record<string, unknown>) =>
-          toolName.startsWith('mcp__bizpilot__') || WEB_TOOLS.includes(toolName)
+          toolName.startsWith('mcp__bizpilot__') || WEB_TOOLS.includes(toolName) || (team && AGENT_TOOLS.includes(toolName))
             ? { behavior: 'allow' as const, updatedInput: input }
             : { behavior: 'deny' as const, message: 'Only BizPilot tools and web research are available.' },
         permissionMode: 'default',
@@ -191,23 +215,39 @@ async function run(l: Live) {
             reportRun(true);
           }
           break;
-        case 'assistant':
+        case 'assistant': {
+          // Steps inside a team member carry the id of the lead's Agent call that started it.
+          const agent = msg.parent_tool_use_id ? members.get(msg.parent_tool_use_id) ?? 'team member' : undefined;
           for (const b of msg.message?.content ?? []) {
-            if (b.type === 'text' && b.text?.trim()) push(l, { kind: 'message', text: b.text.trim() });
-            else if (b.type === 'thinking' && b.thinking?.trim()) push(l, { kind: 'thought', text: b.thinking.trim() });
-            else if (b.type === 'tool_use' && b.name !== 'mcp__bizpilot__share_plan') {
-              push(l, { kind: 'tool_call', text: friendly(b.name), data: { id: b.id, tool: b.name.replace(/^mcp__bizpilot__/, ''), input: b.input } });
+            if (b.type === 'text' && b.text?.trim()) push(l, agent ? { kind: 'thought', text: b.text.trim(), data: { agent } } : { kind: 'message', text: b.text.trim() });
+            else if (b.type === 'thinking' && b.thinking?.trim()) push(l, { kind: 'thought', text: b.thinking.trim(), data: agent ? { agent } : undefined });
+            else if (b.type === 'tool_use' && AGENT_TOOLS.includes(b.name)) {
+              const name = String(b.input?.subagent_type ?? 'team member');
+              members.set(b.id, name);
+              push(l, { kind: 'status', text: `${labelOf(name)} started: ${String(b.input?.description ?? '').slice(0, 200)}`, data: { id: b.id, agent: name, team: 'started', brief: String(b.input?.prompt ?? '').slice(0, 1500) } });
+            } else if (b.type === 'tool_use' && b.name !== 'mcp__bizpilot__share_plan') {
+              push(l, { kind: 'tool_call', text: friendly(b.name), data: { id: b.id, tool: b.name.replace(/^mcp__bizpilot__/, ''), input: b.input, agent } });
             }
           }
           if (msg.error) push(l, { kind: 'error', text: String(msg.error) });
           break;
+        }
         case 'user':
           if (Array.isArray(msg.message?.content)) {
+            const agent = msg.parent_tool_use_id ? members.get(msg.parent_tool_use_id) ?? 'team member' : undefined;
             for (const b of msg.message.content) {
               if (b.type !== 'tool_result') continue;
               const text = toolResultText(b.content);
               if (text === 'Plan shared.') continue;
-              push(l, { kind: b.is_error || text.startsWith('ERROR:') ? 'error' : 'tool_result', text, data: { id: b.tool_use_id } });
+              const member = members.get(b.tool_use_id);
+              if (member) {
+                // A team member finished: its report goes back to the lead.
+                const failed = Boolean(b.is_error) || /^(error|failed)\b/i.test(text.trim());
+                push(l, { kind: 'status', text: `${labelOf(member)} ${failed ? 'stopped with a problem' : 'finished'}`, data: { id: b.tool_use_id, agent: member, team: failed ? 'failed' : 'done' } });
+                push(l, { kind: failed ? 'error' : 'tool_result', text, data: { id: b.tool_use_id, agent: member, report: true } });
+                continue;
+              }
+              push(l, { kind: b.is_error || text.startsWith('ERROR:') ? 'error' : 'tool_result', text, data: { id: b.tool_use_id, agent } });
             }
           }
           break;

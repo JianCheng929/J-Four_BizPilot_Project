@@ -71,6 +71,12 @@ Re-run the file whenever you get a newer copy.
 
 Until it is run, the app still works but saves row by row without conflict checks, and team roles are off.
 
+## 7c. Two-step login and backups (once)
+
+1. Run `supabase/industrial.sql` again (it is safe to re-run). It adds the warehouse, budget, receipt and PDPA consent fields, and the private `receipts` and `backups` storage buckets.
+2. Supabase → Authentication → Sign In / Providers → Multi-Factor Authentication: turn on **TOTP (authenticator app)**. Each person then turns on two-step login in BizPilot → Settings → Team & data.
+3. Nothing to set on Render: the server saves a backup of every business once a day and keeps the last 30 (Settings → Team & data → Automatic backups).
+
 ## 8. AI images and videos
 - Images: free option, add `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` on Render (Cloudflare Workers AI, free daily allowance; token with Workers AI permission). Or add `GEMINI_API_KEY` on Render (free key from aistudio.google.com/apikey; image generation is billed per image), or `OPENAI_API_KEY`, or the Kling keys below. Without a key a free, low-quality service is used and it often refuses with error 402.
 - Real motion video uses Kling AI: in Render → Environment add `KLING_ACCESS_KEY` and

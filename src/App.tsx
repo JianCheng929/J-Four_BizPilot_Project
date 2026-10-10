@@ -1,3 +1,5 @@
+import { TwoStepPrompt } from '@/components/bizpilot/TwoStep';
+import { needsTwoStepCode } from '@/lib/twoStep';
 import { useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { Loader2 } from 'lucide-react';
@@ -59,6 +61,8 @@ function Gate() {
   const [business, setBusiness] = useState<BusinessRow | null | undefined>(undefined);
   const [db, setDb] = useState<BizPilotDB | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Two-step login: 'ask' shows the code screen before any business data loads.
+  const [twoStep, setTwoStep] = useState<{ user: string; state: 'ask' | 'ok' } | null>(null);
 
   useEffect(() => {
     supa.auth.getSession().then(({ data }) => setSession(data.session));
@@ -66,7 +70,18 @@ function Gate() {
     return () => data.subscription.unsubscribe();
   }, [supa]);
 
-  const userId = session?.user.id;
+  const sessionUser = session?.user.id;
+  useEffect(() => {
+    if (!sessionUser) return;
+    let live = true;
+    needsTwoStepCode()
+      .then((need) => live && setTwoStep({ user: sessionUser, state: need ? 'ask' : 'ok' }))
+      .catch(() => live && setTwoStep({ user: sessionUser, state: 'ok' }));
+    return () => { live = false; };
+  }, [sessionUser]);
+  const step = twoStep && twoStep.user === sessionUser ? twoStep.state : 'checking';
+
+  const userId = step === 'ok' ? sessionUser : undefined;
   useEffect(() => {
     if (!userId) {
       setBusiness(undefined);
@@ -85,6 +100,8 @@ function Gate() {
   if (error) return <FullScreen><p className="font-semibold text-red-700">Can't load your business</p><p>{error}</p></FullScreen>;
   if (session === undefined) return <FullScreen><Loader2 className="mx-auto h-5 w-5 animate-spin" /></FullScreen>;
   if (!session) return <Login />;
+  if (step === 'ask') return <TwoStepPrompt onDone={() => setTwoStep({ user: session.user.id, state: 'ok' })} />;
+  if (step === 'checking') return <FullScreen><Loader2 className="mx-auto h-5 w-5 animate-spin" /></FullScreen>;
   if (business === undefined) return <FullScreen><Loader2 className="mx-auto h-5 w-5 animate-spin" /></FullScreen>;
   if (business === null) {
     return (

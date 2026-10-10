@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Kpi, NONE, SimpleSelect, SectionCard, SOURCE_LABEL, primaryBtn } from '@/components/bizpilot/common';
 import type { SalesOrder } from '@/lib/db/types';
+import { BranchComparison } from '@/components/bizpilot/BranchComparison';
 
 const PRESETS = [
   { key: '7d', label: 'Last 7 days' },
@@ -239,6 +240,8 @@ export function Reports({ onNavigate }: { onNavigate?: (p: PageKey) => void }) {
               </Table>
             </SectionCard>
           )}
+
+          {!filter.productId && <BranchComparison />}
 
           {report.stockPurchases.count > 0 && (
             <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">

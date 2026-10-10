@@ -26,6 +26,7 @@ import { VideoMaker, type VideoPlan } from '@/components/bizpilot/VideoMaker';
  */
 
 const GOALS: { label: string; prompt: string }[] = [
+  { label: 'Weekly run (whole team)', prompt: 'Run this week\'s operations with the whole team in parallel: restock what is running low (move stock, plan production or draft purchase orders within the cash we have), get waiting orders picked, packed and quoted for shipping, check cash, overdue invoices and the budget and send reminders, and draft marketing for the slow movers. Quality-check everything, then give me one short summary and what needs my approval.' },
   { label: 'Morning briefing', prompt: 'Give me this morning\'s business briefing: sales yesterday and this week, orders waiting to ship, low stock, overdue invoices, bills due, unanswered reviews and pending approvals. Then tell me the 3 most important things to do today and send it to me as a notification.' },
   { label: 'Restock what is running low', prompt: 'Check which products are running low based on real sales velocity and supplier lead times, then draft purchase orders grouped by supplier and send them for my approval.' },
   { label: 'Answer reviews', prompt: 'Go through all new customer reviews. Draft a reply for each in our brand voice and in the customer\'s language, send them for approval, and escalate any that mention safety, fake products or refunds.' },
@@ -47,6 +48,48 @@ function prettyJson(text: string) {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 }
 
+const AGENT_LABEL: Record<string, string> = {
+  'research-agent': 'Research', 'inventory-agent': 'Inventory', 'sales-agent': 'Sales', 'finance-agent': 'Finance', 'marketing-agent': 'Marketing', 'qa-agent': 'Quality check',
+};
+const AGENT_TONE: Record<string, string> = {
+  'research-agent': 'bg-sky-100 text-sky-800', 'inventory-agent': 'bg-amber-100 text-amber-800', 'sales-agent': 'bg-violet-100 text-violet-800',
+  'finance-agent': 'bg-emerald-100 text-emerald-800', 'marketing-agent': 'bg-pink-100 text-pink-800', 'qa-agent': 'bg-slate-800 text-white',
+};
+const agentOf = (e: AgentEvent) => (e.data as { agent?: string } | undefined)?.agent;
+const agentLabel = (a: string) => AGENT_LABEL[a] ?? a.replace(/-agent$/, '').replace(/-/g, ' ');
+
+function AgentChip({ agent, className }: { agent: string; className?: string }) {
+  return <span className={cn('inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold', AGENT_TONE[agent] ?? 'bg-slate-100 text-slate-700', className)}>{agentLabel(agent)}</span>;
+}
+
+/** The agent team on this goal: who was briefed, who is working, who finished, and the quality check. */
+function TeamStrip({ task }: { task: AgentTask }) {
+  const state = new Map<string, 'started' | 'done' | 'failed'>();
+  for (const e of task.events) {
+    const d = e.data as { agent?: string; team?: 'started' | 'done' | 'failed' } | undefined;
+    if (d?.agent && d.team) state.set(d.agent, d.team);
+  }
+  const check = [...task.events].reverse().map((e) => (e.data as { verification?: { passed: boolean; errors: number; checked: number } } | undefined)?.verification).find(Boolean);
+  if (!state.size && !check) return null;
+  const running = ACTIVE.includes(task.status);
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      <span className="text-slate-500">Agent team:</span>
+      {[...state].map(([a, st]) => (
+        <span key={a} className="inline-flex items-center gap-1">
+          <AgentChip agent={a} />
+          {st === 'started' ? (running ? <Loader2 className="h-3 w-3 animate-spin text-slate-400" /> : <CircleDot className="h-3 w-3 text-slate-400" />) : st === 'done' ? <CheckCircle2 className="h-3 w-3 text-teal-600" /> : <AlertTriangle className="h-3 w-3 text-red-500" />}
+        </span>
+      ))}
+      {check && (
+        <span className={cn('ml-1 rounded px-1.5 py-0.5 font-medium', check.passed ? 'bg-teal-50 text-teal-800' : 'bg-red-50 text-red-700')}>
+          {check.passed ? `Quality check passed (${check.checked} checked)` : `Quality check: ${check.errors} to fix`}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function EventRow({ e }: { e: AgentEvent }) {
   const [open, setOpen] = useState(false);
   const Icon = ICON[e.kind] ?? CircleDot;
@@ -54,11 +97,14 @@ function EventRow({ e }: { e: AgentEvent }) {
     e.kind === 'error' ? 'text-red-600' : e.kind === 'artifact' ? 'text-teal-700' : e.kind === 'plan' ? 'text-indigo-600' : e.kind === 'tool_call' ? 'text-amber-600' : 'text-slate-500';
   const expandable = e.kind === 'tool_result' || e.kind === 'tool_call' || e.kind === 'thought';
   const input = e.kind === 'tool_call' ? (e.data as { input?: unknown } | undefined)?.input : undefined;
+  const agent = agentOf(e);
 
   return (
     <li className="relative flex gap-3 pb-3">
       <Icon className={cn('mt-0.5 h-4 w-4 shrink-0', tone)} />
-      <div className="min-w-0 flex-1 text-sm">
+      <div className={cn('min-w-0 flex-1 text-sm', agent && 'flex items-start gap-1.5')}>
+        {agent && <AgentChip agent={agent} className="mt-0.5" />}
+        <div className="min-w-0 flex-1">
         {e.kind === 'plan' ? (
           <div className="rounded-md border border-indigo-100 bg-indigo-50/60 p-2">
             <div className="mb-1 text-xs font-semibold text-indigo-700">Plan</div>
@@ -81,6 +127,7 @@ function EventRow({ e }: { e: AgentEvent }) {
             {e.kind === 'tool_call' ? JSON.stringify(input ?? {}, null, 2) : prettyJson(e.text)}
           </pre>
         )}
+        </div>
       </div>
       <span className="shrink-0 text-[10px] text-slate-400">{new Date(e.at).toLocaleTimeString('en-MY', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
     </li>
@@ -154,6 +201,7 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
       <div className="flex gap-3">
         <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-700"><Bot className="h-4 w-4" /></div>
         <div className="min-w-0 flex-1 space-y-2">
+          <TeamStrip task={task} />
           {running ? (
             <>
             <ol className="border-l border-slate-100 pl-1">

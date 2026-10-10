@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { CalendarClock, Pencil, Plus, Receipt, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { toast } from 'sonner';
+import { CalendarClock, Paperclip, Pencil, Plus, Receipt, Trash2 } from 'lucide-react';
+import { openReceipt, uploadReceipt } from '@/lib/receipts';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
 import { upcomingBills } from '@/lib/metrics';
@@ -12,7 +14,10 @@ import { EmptyState, Pill, SectionCard, primaryBtn } from '../common';
 import { ExpenseDialog } from '../ExpenseDialog';
 
 export function ExpensesTab() {
-  const { db, run } = useBizPilot();
+  const { db, run, business, can } = useBizPilot();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const receiptFor = useRef<Expense | null>(null);
+  const pickReceipt = (e: Expense) => { receiptFor.current = e; fileRef.current?.click(); };
   const [dialog, setDialog] = useState<{ open: boolean; expense: Expense | null }>({ open: false, expense: null });
   const [cat, setCat] = useState('all');
 
@@ -162,6 +167,15 @@ export function ExpensesTab() {
                         Mark paid
                       </Button>
                     )}
+                    {e.receiptUrl ? (
+                      <Button size="icon-sm" variant="ghost" title="Open receipt" onClick={() => void openReceipt(e.receiptUrl!).catch((err) => toast.error((err as Error).message))}>
+                        <Paperclip className="h-4 w-4 text-teal-700" />
+                      </Button>
+                    ) : (
+                      <Button size="icon-sm" variant="ghost" title="Attach receipt (photo or PDF)" disabled={!can.write} onClick={() => pickReceipt(e)}>
+                        <Paperclip className="h-4 w-4 text-slate-400" />
+                      </Button>
+                    )}
                     <Button size="icon-sm" variant="ghost" onClick={() => setDialog({ open: true, expense: e })}>
                       <Pencil className="h-4 w-4" />
                     </Button>
@@ -176,6 +190,22 @@ export function ExpensesTab() {
         </Table>
       </SectionCard>
       <ExpenseDialog open={dialog.open} onOpenChange={(o) => setDialog((s) => ({ ...s, open: o }))} expense={dialog.expense} />
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*,application/pdf"
+        capture="environment"
+        className="hidden"
+        onChange={(ev) => {
+          const file = ev.target.files?.[0];
+          const target = receiptFor.current;
+          ev.target.value = '';
+          if (!file || !target) return;
+          void uploadReceipt(business.id, target.id, file)
+            .then((path) => run((d, a) => ops.attachReceipt(d, target.id, path, a), 'Receipt attached'))
+            .catch((err) => toast.error((err as Error).message));
+        }}
+      />
     </div>
   );
 }

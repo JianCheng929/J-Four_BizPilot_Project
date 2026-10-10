@@ -15,6 +15,7 @@ import { AgeingTab } from '@/components/bizpilot/finance/AgeingTab';
 import { receivablesAgeing } from '@/lib/metrics';
 import { PnLTab } from '@/components/bizpilot/finance/PnLTab';
 import { CashFlowTab } from '@/components/bizpilot/finance/CashFlowTab';
+import { BudgetTab } from '@/components/bizpilot/finance/BudgetTab';
 import { MarginCheck } from '@/components/bizpilot/MarginCheck';
 import { PricingCalculator } from '@/components/bizpilot/PricingCalculator';
 
@@ -60,6 +61,7 @@ export function Finance() {
           <TabsTrigger value="ageing">Who owes what{receivablesAgeing(db).overdue > 0 ? ' •' : ''}</TabsTrigger>
           <TabsTrigger value="pnl">P&amp;L</TabsTrigger>
           <TabsTrigger value="cash">Cash flow</TabsTrigger>
+          <TabsTrigger value="budget">Budget</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
         </TabsList>
         <TabsContent value="sales" className="mt-4">
@@ -92,6 +94,9 @@ export function Finance() {
         </TabsContent>
         <TabsContent value="cash" className="mt-4">
           <CashFlowTab />
+        </TabsContent>
+        <TabsContent value="budget" className="mt-4">
+          <BudgetTab />
         </TabsContent>
         <TabsContent value="pricing" className="mt-4 space-y-4">
           <MarginCheck />

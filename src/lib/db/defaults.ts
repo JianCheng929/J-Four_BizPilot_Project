@@ -61,6 +61,8 @@ export function emptyDB(): BizPilotDB {
     stockCounts: [],
     productionOrders: [],
     quotations: [],
+    staffTasks: [],
+    consents: [],
     approvals: [],
     auditLog: [],
     notifications: [],
@@ -111,6 +113,8 @@ const RECORD_DEFAULTS: Partial<Record<CollectionKey, Record<string, unknown>>> =
     locationId: '', materials: [], plannedUnitCost: 0, actualUnitCost: 0, labourCost: 0, overheadCost: 0, goodQty: 0,
     rejectedQty: 0, batchNumber: '', qcNotes: '', dueDate: '', note: '', startedAt: null, completedAt: null, createdBy: '',
   },
+  staffTasks: { detail: '', assignee: '', locationId: '', ref: '', dueDate: null, completedAt: null, createdBy: '', doneBy: '' },
+  consents: { customerName: '', email: '', phone: '', channel: 'any', source: '', note: '', recordedBy: '' },
   campaigns: { dailyCap: 0, spend: 0, clicks: 0, impressions: 0, conversions: 0, revenue: 0 },
   agentTasks: { events: [], result: null, workbuddyTaskId: null, workbuddyLink: null },
 };

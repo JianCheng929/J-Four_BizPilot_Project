@@ -16,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { DataExportCard, TeamCard } from '@/components/bizpilot/TeamCard';
+import { TwoStepCard } from '@/components/bizpilot/TwoStep';
+import { BackupsCard } from '@/components/bizpilot/BackupsCard';
 
 // ---------------------------------------------------------------- types from the server
 
@@ -467,7 +469,7 @@ export function Settings() {
         <TabsContent value="profile"><ProfileForm /></TabsContent>
         <TabsContent value="integrations"><Integrations /></TabsContent>
         <TabsContent value="pos"><PosTokens /></TabsContent>
-        <TabsContent value="team" className="space-y-4"><TeamCard /><DataExportCard /></TabsContent>
+        <TabsContent value="team" className="space-y-4"><TeamCard /><TwoStepCard /><BackupsCard /><DataExportCard /></TabsContent>
       </Tabs>
     </div>
   );

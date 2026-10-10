@@ -5,6 +5,8 @@ import { klingConfigured, klingImage } from './kling.ts';
  * AI image generation for marketing (blueprint C2/C5).
  *
  * Uses the first image model that has a key on the server:
+ *   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN   Cloudflare Workers AI,
+ *                    FLUX.1 schnell (free daily allowance, square images)
  *   GEMINI_API_KEY   Google Gemini image model (default gemini-2.5-flash-image)
  *   OPENAI_API_KEY   OpenAI gpt-image-1
  *   KLING_ACCESS_KEY + KLING_SECRET_KEY   Kling AI (Kolors)
@@ -67,6 +69,25 @@ async function download(url: string, engine: string): Promise<Raw> {
   return { bytes: Buffer.from(await r.arrayBuffer()), type, engine };
 }
 
+const cloudflareConfigured = () => Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN);
+
+async function cloudflare(prompt: string): Promise<Raw> {
+  const model = process.env.CLOUDFLARE_IMAGE_MODEL || '@cf/black-forest-labs/flux-1-schnell';
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${model}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` },
+    body: JSON.stringify({ prompt: prompt.slice(0, 2000), steps: 8 }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const body = (await res.json().catch(() => ({}))) as { success?: boolean; result?: { image?: string }; errors?: { message?: string }[] };
+  const b64 = body.result?.image;
+  if (!res.ok || !b64) {
+    const why = body.errors?.map((e) => e.message).filter(Boolean).join('; ') || `HTTP ${res.status}`;
+    throw new Error(`Cloudflare: ${why}${res.status === 429 ? ' (free daily allowance used up)' : ''}`);
+  }
+  return { bytes: Buffer.from(b64, 'base64'), type: 'image/jpeg', engine: 'Cloudflare FLUX' };
+}
+
 async function kling(prompt: string, aspect: Aspect): Promise<Raw> {
   return download(await klingImage(prompt, aspect), 'Kling');
 }
@@ -85,11 +106,12 @@ async function pollinations(prompt: string, aspect: Aspect): Promise<Raw> {
       await new Promise((ok) => setTimeout(ok, 5000 * (attempt + 1)));
     }
   }
-  throw new Error(`${last?.message}. For reliable, high-quality images add GEMINI_API_KEY (or OPENAI_API_KEY / Kling keys) on the server.`);
+  throw new Error(`${last?.message}. For reliable, high-quality images add CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (free) or GEMINI_API_KEY on the server.`);
 }
 
 export function imageEngines(): string[] {
   const e: string[] = [];
+  if (cloudflareConfigured()) e.push('cloudflare');
   if (process.env.GEMINI_API_KEY) e.push('gemini');
   if (process.env.OPENAI_API_KEY) e.push('openai');
   if (klingConfigured()) e.push('kling');
@@ -97,7 +119,7 @@ export function imageEngines(): string[] {
   return e;
 }
 
-const RUN: Record<string, (p: string, a: Aspect) => Promise<Raw>> = { gemini, openai, kling, pollinations };
+const RUN: Record<string, (p: string, a: Aspect) => Promise<Raw>> = { cloudflare, gemini, openai, kling, pollinations };
 
 export async function generateImage(businessId: string, prompt: string, aspect: Aspect = '1:1'): Promise<GeneratedImage> {
   const clean = prompt.replace(/\s+/g, ' ').trim().slice(0, 1800);

@@ -72,7 +72,7 @@ Re-run the file whenever you get a newer copy.
 Until it is run, the app still works but saves row by row without conflict checks, and team roles are off.
 
 ## 8. AI images and videos
-- Images: add `GEMINI_API_KEY` on Render (free key from aistudio.google.com/apikey; image generation is billed per image), or `OPENAI_API_KEY`, or the Kling keys below. Without a key a free, low-quality service is used and it often refuses with error 402.
+- Images: free option, add `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` on Render (Cloudflare Workers AI, free daily allowance; token with Workers AI permission). Or add `GEMINI_API_KEY` on Render (free key from aistudio.google.com/apikey; image generation is billed per image), or `OPENAI_API_KEY`, or the Kling keys below. Without a key a free, low-quality service is used and it often refuses with error 402.
 - Real motion video uses Kling AI: in Render → Environment add `KLING_ACCESS_KEY` and
   `KLING_SECRET_KEY` from the Kling developer console (paid API credits). Without them,
   videos are made as animated slideshows from AI images in the browser.

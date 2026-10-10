@@ -96,6 +96,19 @@ function StatusBadge({ s }: { s: AgentTask['status'] }) {
 
 interface Chat { id: string; title: string; messages: number; lastAt: string; lastStatus: AgentTask['status'] }
 
+const chatOf = (t: AgentTask) => t.conversationId || t.id;
+
+/** Chats from the tasks already loaded in the browser, so the page opens instantly. */
+function chatsFrom(tasks: AgentTask[]): Chat[] {
+  const chats = new Map<string, Chat>();
+  for (const t of [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const c = chats.get(chatOf(t));
+    if (c) { c.messages++; c.lastAt = t.updatedAt; c.lastStatus = t.status; }
+    else chats.set(chatOf(t), { id: chatOf(t), title: t.prompt.slice(0, 120), messages: 1, lastAt: t.updatedAt || t.createdAt, lastStatus: t.status });
+  }
+  return [...chats.values()].sort((a, b) => b.lastAt.localeCompare(a.lastAt));
+}
+
 /** One exchange: the owner's message, WorkBuddy's steps (folded once done) and its answer. */
 function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: () => void; pending: number; onNavigate?: (p: PageKey) => void }) {
   const running = ACTIVE.includes(task.status);
@@ -158,7 +171,7 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
 export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => void } = {}) {
   const { db, reload } = useBizPilot();
   const [prompt, setPrompt] = useState('');
-  const [chats, setChats] = useState<Chat[]>([]);
+  const [chats, setChats] = useState<Chat[]>(() => chatsFrom(db.agentTasks));
   const [chatId, setChatId] = useState<string | null>(null);
   const [turns, setTurns] = useState<AgentTask[]>([]);
   const [loadingChat, setLoadingChat] = useState(false);
@@ -172,12 +185,17 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
     try { setChats(await api<Chat[]>('/api/agent/conversations')); } catch { /* list is optional */ }
   }, []);
 
+  const tasksRef = useRef(db.agentTasks);
+  tasksRef.current = db.agentTasks;
   const openChat = useCallback(async (id: string | null) => {
     setChatId(id);
     if (!id) { setTurns([]); return; }
-    setLoadingChat(true);
+    // Show what the browser already has straight away, then refresh from the server.
+    const local = tasksRef.current.filter((t) => chatOf(t) === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    setTurns(local);
+    setLoadingChat(local.length === 0);
     try { setTurns(await api<AgentTask[]>(`/api/agent/conversations/${id}`)); }
-    catch (e) { toast.error((e as Error).message); }
+    catch (e) { if (!local.length) toast.error((e as Error).message); }
     finally { setLoadingChat(false); }
   }, []);
 

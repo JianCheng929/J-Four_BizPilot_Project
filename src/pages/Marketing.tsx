@@ -14,7 +14,7 @@ import { post } from '@/lib/api';
 import { salesTotal } from '@/lib/metrics';
 import { cn } from '@/lib/utils';
 import { EmptyState, Kpi, Pill, SectionCard, StatusPill, primaryBtn } from '@/components/bizpilot/common';
-import { AUTO_PUBLISH, BrandProfileDialog, CampaignDialog, ContentDialog } from '@/components/bizpilot/MarketingDialogs';
+import { AUTO_PUBLISH, BrandProfileDialog, CampaignDialog, ContentDialog, ContentIdeaDialog } from '@/components/bizpilot/MarketingDialogs';
 import { hasPendingApproval } from '@/components/bizpilot/actions';
 
 const CONTENT_FILTERS = ['upcoming', 'all', 'draft', 'in_review', 'scheduled', 'published', 'failed'] as const;
@@ -61,6 +61,9 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
   const [anchor, setAnchor] = useState(() => new Date());
   const [typeFilter, setTypeFilter] = useState<(typeof TYPE_FILTERS)[number][0]>('all');
   const [asking, setAsking] = useState(false);
+  const [ideaOpen, setIdeaOpen] = useState(false);
+  const [calPlatform, setCalPlatform] = useState<'all' | ContentItem['platform']>('all');
+  const calItems = calPlatform === 'all' ? db.contentItems : db.contentItems.filter((c) => c.platform === calPlatform);
 
   /** Hand a marketing job to WorkBuddy and open its chat in Command Centre. */
   const ask = async (goal: string) => {
@@ -76,7 +79,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
     }
   };
   const nextMonday = addDays(startOfWeek(new Date()), 7).toLocaleDateString('en-CA');
-  const PLAN_WEEK = `Load the marketing-content skill and plan next week's content (Monday ${nextMonday} to Sunday). Create the drafts in the content calendar now.`;
+  const PLAN_WEEK = `Load the marketing-content skill and plan next week's content (Monday ${nextMonday} to Sunday)${calPlatform === 'all' ? ', with a separate schedule for each platform that suits the business' : ` for ${calPlatform} only, using ${calPlatform}'s own best posting times and formats`}. Create the drafts in the content calendar now.`;
   const VIDEO = 'Load the marketing-content skill and write one short promotional video (script, storyboard, shot list, voice-over, subtitles, title and thumbnail ideas) for the product that most needs a push right now. Save it as a video_script draft.';
   const INSIGHTS = 'Load the marketing-content skill and review our marketing results: what worked, what did not, and the 3 things to change next week. Separate facts from guesses.';
   const [brandOpen, setBrandOpen] = useState(false);
@@ -91,7 +94,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const items = db.contentItems
+  const items = calItems
     .filter((c) => {
       if (filter === 'all') return true;
       if (filter === 'upcoming') return c.status !== 'published' || new Date(c.scheduledDate) >= todayStart;
@@ -163,11 +166,11 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
         subtitle="Brand profile, content calendar, post and video drafts, campaigns and analytics"
         actions={
           <>
-            <Button size="sm" variant="outline" onClick={() => setContentDialog({ open: true, item: null })}>
-              <Plus className="mr-1 h-4 w-4" /> New content
+            <Button size="sm" variant="outline" disabled={asking} onClick={() => void ask(PLAN_WEEK)}>
+              <Sparkles className="mr-1 h-4 w-4" /> Plan next week{calPlatform === 'all' ? '' : ` for ${calPlatform}`} with WorkBuddy
             </Button>
-            <Button size="sm" className={primaryBtn} disabled={asking} onClick={() => void ask(PLAN_WEEK)}>
-              <Sparkles className="mr-1 h-4 w-4" /> Plan next week with WorkBuddy
+            <Button size="sm" className={primaryBtn} onClick={() => setIdeaOpen(true)}>
+              <Plus className="mr-1 h-4 w-4" /> New content
             </Button>
           </>
         }
@@ -246,6 +249,21 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
         </TabsContent>
 
         <TabsContent value="calendar" className="mt-4 space-y-4">
+          <div className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
+            {(['all', 'Facebook', 'Instagram', 'TikTok', 'YouTube', 'LinkedIn'] as const).map((p) => {
+              const n = p === 'all' ? db.contentItems.length : db.contentItems.filter((c) => c.platform === p).length;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setCalPlatform(p)}
+                  className={cn('rounded-md px-3 py-1.5 text-sm', calPlatform === p ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900')}
+                >
+                  {p === 'all' ? 'All platforms' : p} <span className="text-xs text-slate-400">{n}</span>
+                </button>
+              );
+            })}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             {(['week', 'month', 'list'] as const).map((v) => (
               <Button key={v} size="sm" variant={view === v ? 'default' : 'outline'} className={cn(view === v && primaryBtn)} onClick={() => setView(v)}>
@@ -282,7 +300,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
                     ))}
                     {days.map((d) => {
                       const key = d.toLocaleDateString('en-CA');
-                      const list = db.contentItems.filter((c) => dayKey(c.scheduledDate) === key);
+                      const list = calItems.filter((c) => dayKey(c.scheduledDate) === key);
                       const outside = view === 'month' && d.getMonth() !== anchor.getMonth();
                       return (
                         <div key={key} className={cn('min-h-24 bg-white p-1.5', view === 'week' && 'min-h-40', outside && 'bg-slate-50/70')}>
@@ -323,7 +341,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
               title="Your content calendar is empty"
               body="Draft a post, choose a date and submit it for approval. Approved Facebook and Instagram posts are published automatically."
               actionLabel="Create your first post"
-              onAction={() => setContentDialog({ open: true, item: null })}
+              onAction={() => setIdeaOpen(true)}
             />
           ) : (
             <SectionCard
@@ -680,6 +698,7 @@ export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void })
       </Tabs>
 
       <BrandProfileDialog open={brandOpen} onOpenChange={setBrandOpen} />
+      <ContentIdeaDialog open={ideaOpen} onOpenChange={setIdeaOpen} onSend={ask} onManual={() => setContentDialog({ open: true, item: null })} />
       <ContentDialog open={contentDialog.open} onOpenChange={(o) => setContentDialog((x) => ({ ...x, open: o }))} item={contentDialog.item} />
       <CampaignDialog open={campDialog.open} onOpenChange={(o) => setCampDialog((x) => ({ ...x, open: o }))} campaign={campDialog.campaign} />
     </div>

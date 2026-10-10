@@ -1,0 +1,286 @@
+-- ============================================================
+-- BizPilot: team roles, safe concurrent saves, append-only audit log
+-- Run once in the Supabase SQL Editor (Dashboard → SQL Editor → New query → Run),
+-- AFTER schema.sql, marketing-media.sql and team-features.sql. Safe to re-run; data is kept.
+--
+-- What it adds (blueprint §6 B5, §12, §17, §19 Phase 1):
+--   1. Staff roles: owner, manager, staff, viewer. Members see only their business.
+--   2. Every saved record carries a row_version. Saves go through one database
+--      transaction (bizpilot_commit) that refuses to overwrite a newer version,
+--      so two people, the agent and a marketplace sync can't overwrite each other
+--      or oversell stock. Either every change in a save lands, or none does.
+--   3. The audit log can only be added to, never edited or deleted.
+--   4. Only owners and managers can decide approvals; stock can't go negative.
+-- ============================================================
+
+-- 1. Team members ------------------------------------------------------------------
+create table if not exists business_members (
+  id uuid primary key default gen_random_uuid(),
+  business_id uuid not null references businesses (id) on delete cascade,
+  user_id uuid references auth.users (id) on delete cascade,
+  email text not null,
+  role text not null default 'staff' check (role in ('manager','staff','viewer')),
+  invited_by text default '',
+  invited_at timestamptz default now(),
+  accepted_at timestamptz,
+  unique (business_id, email)
+);
+create unique index if not exists business_members_user_idx on business_members (user_id) where user_id is not null;
+
+-- The signed-in user's role in a business: owner, manager, staff, viewer or null.
+create or replace function business_role(bid uuid) returns text
+language sql security definer stable set search_path = public as $$
+  select case
+    when exists (select 1 from businesses where id = bid and owner_id = auth.uid()) then 'owner'
+    else (select role from business_members where business_id = bid and user_id = auth.uid())
+  end;
+$$;
+
+-- Kept under its old name so every existing policy now means "any member of this business".
+create or replace function is_business_owner(bid uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select business_role(bid) is not null;
+$$;
+
+create or replace function can_write_business(bid uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select coalesce(business_role(bid) in ('owner','manager','staff'), false);
+$$;
+
+create or replace function can_manage_business(bid uuid) returns boolean
+language sql security definer stable set search_path = public as $$
+  select coalesce(business_role(bid) in ('owner','manager'), false);
+$$;
+
+-- Link the signed-in user to the business that invited their (confirmed) email address.
+create or replace function accept_business_invite() returns uuid
+language plpgsql security definer set search_path = public as $$
+declare
+  bid uuid;
+  mid uuid;
+begin
+  if auth.uid() is null then return null; end if;
+  select business_id into bid from business_members where user_id = auth.uid();
+  if bid is not null then return bid; end if;
+  if exists (select 1 from businesses where owner_id = auth.uid()) then return null; end if;
+  if not exists (select 1 from auth.users where id = auth.uid() and email_confirmed_at is not null) then return null; end if;
+  select id, business_id into mid, bid from business_members
+   where user_id is null and lower(email) = lower(auth.jwt() ->> 'email')
+   order by invited_at limit 1;
+  if mid is null then return null; end if;
+  update business_members set user_id = auth.uid(), accepted_at = now() where id = mid;
+  return bid;
+end $$;
+
+grant execute on function business_role(uuid), is_business_owner(uuid), can_write_business(uuid),
+  can_manage_business(uuid), accept_business_invite() to authenticated;
+
+alter table business_members enable row level security;
+drop policy if exists "members read team" on business_members;
+create policy "members read team" on business_members for select using (is_business_owner(business_id));
+drop policy if exists "owner manages team" on business_members;
+create policy "owner manages team" on business_members for all
+  using (business_role(business_id) = 'owner') with check (business_role(business_id) = 'owner');
+
+-- Businesses: members read, owner/manager edit settings, only the owner creates or deletes.
+drop policy if exists "own business" on businesses;
+drop policy if exists "members read business" on businesses;
+drop policy if exists "owner creates business" on businesses;
+drop policy if exists "managers edit business" on businesses;
+drop policy if exists "owner deletes business" on businesses;
+create policy "members read business" on businesses for select using (owner_id = auth.uid() or is_business_owner(id));
+create policy "owner creates business" on businesses for insert with check (owner_id = auth.uid());
+create policy "managers edit business" on businesses for update using (can_manage_business(id)) with check (can_manage_business(id));
+create policy "owner deletes business" on businesses for delete using (owner_id = auth.uid());
+
+create or replace function guard_business_owner() returns trigger language plpgsql as $$
+begin
+  if new.owner_id is distinct from old.owner_id then raise exception 'The business owner cannot be changed here.'; end if;
+  return new;
+end $$;
+drop trigger if exists guard_business_owner on businesses;
+create trigger guard_business_owner before update on businesses for each row execute function guard_business_owner();
+
+-- Business tables: members read; owner, manager and staff write; viewers read only.
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
+    'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
+    'audit_log','notifications','agent_tasks','return_cases'
+  ]
+  loop
+    execute format('alter table %I enable row level security', t);
+    execute format('drop policy if exists "tenant isolation" on %I', t);
+    execute format('drop policy if exists "members read" on %I', t);
+    execute format('drop policy if exists "members insert" on %I', t);
+    execute format('drop policy if exists "members update" on %I', t);
+    execute format('drop policy if exists "members delete" on %I', t);
+    execute format('create policy "members read" on %I for select using (is_business_owner(business_id))', t);
+    execute format('create policy "members insert" on %I for insert with check (can_write_business(business_id))', t);
+    if t <> 'audit_log' then
+      execute format('create policy "members update" on %I for update using (can_write_business(business_id)) with check (can_write_business(business_id))', t);
+      execute format('create policy "members delete" on %I for delete using (can_write_business(business_id))', t);
+    end if;
+  end loop;
+end $$;
+
+-- 2. Row versions ---------------------------------------------------------------------
+create or replace function bizpilot_bump_version() returns trigger language plpgsql as $$
+begin
+  new.row_version := coalesce(old.row_version, 0) + 1;
+  return new;
+end $$;
+
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'businesses','products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
+    'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
+    'audit_log','notifications','agent_tasks','return_cases'
+  ]
+  loop
+    execute format('alter table %I add column if not exists row_version int not null default 0', t);
+    execute format('drop trigger if exists bump_row_version on %I', t);
+    execute format('create trigger bump_row_version before update on %I for each row execute function bizpilot_bump_version()', t);
+  end loop;
+end $$;
+
+
+-- 3. Audit log is append-only ---------------------------------------------------------
+create or replace function audit_log_append_only() returns trigger language plpgsql as $$
+begin
+  -- Deleting a whole business (or its owner's account) still removes its log.
+  if tg_op = 'DELETE' and not exists (select 1 from businesses where id = old.business_id) then
+    return old;
+  end if;
+  raise exception 'The audit log is append-only.';
+end $$;
+drop trigger if exists audit_log_append_only on audit_log;
+create trigger audit_log_append_only before update or delete on audit_log
+  for each row when (current_setting('bizpilot.allow_audit_purge', true) is distinct from 'on')
+  execute function audit_log_append_only();
+
+-- 4. Guards ---------------------------------------------------------------------------
+create or replace function guard_approval_decision() returns trigger language plpgsql as $$
+begin
+  if auth.uid() is not null and new.status is distinct from old.status and not can_manage_business(new.business_id) then
+    raise exception 'Only the owner or a manager can decide approvals.';
+  end if;
+  return new;
+end $$;
+drop trigger if exists guard_approval_decision on approval_requests;
+create trigger guard_approval_decision before update on approval_requests for each row execute function guard_approval_decision();
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'products_stock_not_negative') then
+    alter table products add constraint products_stock_not_negative
+      check (stock >= 0 and reserved >= 0 and coalesce(unavailable, 0) >= 0) not valid;
+  end if;
+end $$;
+
+-- The same marketplace or POS order can never be imported twice, even by two syncs at once.
+do $$
+begin
+  create unique index if not exists sales_orders_external_uidx on sales_orders (business_id, source, external_id)
+    where external_id is not null;
+exception when unique_violation then
+  raise notice 'Duplicate imported orders already exist, so the duplicate guard index was not created. Remove the duplicates and re-run.';
+end $$;
+
+-- 5. One-transaction, version-checked save ---------------------------------------------
+-- p_changes: [{ "table": "products", "op": "upsert" | "delete" | "settings", "id": "...",
+--               "version": 3 | null, "row": { ...snake_case columns... } }]
+-- version null = new row (insert). A stale version raises SQLSTATE 40001 and nothing is saved.
+create or replace function bizpilot_commit(p_business uuid, p_changes jsonb) returns jsonb
+language plpgsql security invoker set search_path = public as $$
+declare
+  allowed constant text[] := array[
+    'products','stock_movements','suppliers','purchase_orders','sales_orders','expenses',
+    'invoices','reviews','support_tickets','campaigns','content_items','approval_requests',
+    'audit_log','notifications','agent_tasks','return_cases'];
+  c jsonb;
+  tbl text;
+  op text;
+  rid text;
+  ver int;
+  newver int;
+  rec jsonb;
+  cols text;
+  bad text;
+  out jsonb := '[]'::jsonb;
+begin
+  -- Signed-in users (the web app) need write access; the BizPilot server (service role) has no auth.uid().
+  if auth.uid() is not null and not can_write_business(p_business) then
+    raise exception 'You do not have permission to change this business''s records.' using errcode = '42501';
+  end if;
+  for c in select value from jsonb_array_elements(p_changes) loop
+    tbl := c ->> 'table';
+    op := c ->> 'op';
+    rid := c ->> 'id';
+    ver := case when jsonb_typeof(c -> 'version') = 'number' then (c ->> 'version')::int else null end;
+
+    if op = 'settings' then
+      if auth.uid() is not null and not can_manage_business(p_business) then
+        raise exception 'Only the owner or a manager can change business settings.' using errcode = '42501';
+      end if;
+      update businesses
+         set name = coalesce(c -> 'row' ->> 'name', name),
+             mode = coalesce(c -> 'row' ->> 'mode', mode),
+             settings = coalesce(c -> 'row' -> 'settings', settings)
+       where id = p_business and (ver is null or row_version = ver)
+      returning row_version into newver;
+      if newver is null then
+        raise exception 'bizpilot_conflict: settings were changed by someone else' using errcode = '40001';
+      end if;
+      out := out || jsonb_build_object('table', 'businesses', 'id', p_business::text, 'version', newver);
+      continue;
+    end if;
+
+    if not (tbl = any (allowed)) then
+      raise exception 'bizpilot_commit: unknown table %', tbl;
+    end if;
+
+    if op = 'delete' then
+      execute format('delete from %I where id = $1 and business_id = $2 and ($3::int is null or row_version = $3) returning 1', tbl)
+        into newver using rid, p_business, ver;
+      if newver is null and ver is not null then
+        raise exception 'bizpilot_conflict: % % was changed by someone else', tbl, rid using errcode = '40001';
+      end if;
+      out := out || jsonb_build_object('table', tbl, 'id', rid, 'version', null);
+      continue;
+    end if;
+
+    rec := (c -> 'row') - 'row_version' || jsonb_build_object('business_id', p_business, 'id', rid);
+    select string_agg(k, ', ') into bad from jsonb_object_keys(rec) k
+     where not exists (select 1 from information_schema.columns
+                        where table_schema = 'public' and table_name = tbl and column_name = k);
+    if bad is not null then
+      raise exception 'Table % is missing columns: %. Run the latest SQL files in supabase/.', tbl, bad;
+    end if;
+    select string_agg(quote_ident(k), ', ') into cols from jsonb_object_keys(rec) k;
+
+    if ver is null then
+      execute format('insert into %1$I (%2$s) select %2$s from jsonb_populate_record(null::%1$I, $1) returning row_version', tbl, cols)
+        into newver using rec;
+    else
+      execute format(
+        'update %1$I set (%2$s) = (select %2$s from jsonb_populate_record(null::%1$I, $1)) '
+        'where id = $2 and business_id = $3 and row_version = $4 returning row_version', tbl, cols)
+        into newver using rec, rid, p_business, ver;
+      if newver is null then
+        raise exception 'bizpilot_conflict: % % was changed by someone else', tbl, rid using errcode = '40001';
+      end if;
+    end if;
+    out := out || jsonb_build_object('table', tbl, 'id', rid, 'version', newver);
+  end loop;
+  return out;
+end $$;
+
+grant execute on function bizpilot_commit(uuid, jsonb) to authenticated, service_role;
+
+-- Ask the API to pick up the new function and columns straight away.
+notify pgrst, 'reload schema';

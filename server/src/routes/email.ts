@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import * as ops from '../../../src/lib/ops.ts';
-import { requireUser, ctx } from '../lib/auth.ts';
+import { requireRole, requireUser, ctx } from '../lib/auth.ts';
 import { contextFor, handle, HttpError } from '../lib/http.ts';
 import { invoiceHtml, invoiceText } from '../lib/documents.ts';
 import { readSnapshot, withBusiness } from '../lib/workspace.ts';
@@ -8,7 +8,7 @@ import { sendMail } from '../providers/smtp.ts';
 
 export const email = Router();
 
-email.post('/invoice/:id', requireUser, handle(async (req) => {
+email.post('/invoice/:id', requireUser, requireRole('staff'), handle(async (req) => {
   const c = ctx(req);
   const db = await readSnapshot(c.business.id);
   const inv = db.invoices.find((i) => i.id === req.params.id || i.invoiceNumber === req.params.id);

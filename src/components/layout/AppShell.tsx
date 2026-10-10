@@ -13,6 +13,7 @@ import {
   Settings as SettingsIcon,
   Bell,
   Compass,
+  FileBarChart,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBizPilot } from '@/lib/store';
@@ -34,6 +35,7 @@ export type PageKey =
   | 'finance'
   | 'customers'
   | 'approvals'
+  | 'reports'
   | 'settings';
 
 const NAV: { key: PageKey; label: string; icon: typeof LayoutDashboard }[] = [
@@ -45,6 +47,7 @@ const NAV: { key: PageKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'finance', label: 'Finance', icon: Wallet },
   { key: 'customers', label: 'Customers', icon: MessagesSquare },
   { key: 'approvals', label: 'Approvals', icon: ShieldCheck },
+  { key: 'reports', label: 'Reports', icon: FileBarChart },
   { key: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
 

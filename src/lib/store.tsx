@@ -10,9 +10,9 @@ import {
 } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { toast } from 'sonner';
-import type { ApprovalRequest, BizPilotDB, BusinessSettings } from './db/types';
+import type { ApprovalRequest, BizPilotDB, BusinessSettings, TeamRole } from './db/types';
 import { getSupabase } from './db/supabase';
-import { loadSnapshot, persistDiff, type BusinessRow } from './db/remote';
+import { commitDiff, ConflictError, loadSnapshot, type BusinessRow, type Versions } from './db/remote';
 import { defaultSettings, emptyDB } from './db/defaults';
 import * as ops from './ops';
 import { api, post } from './api';
@@ -29,6 +29,10 @@ interface Store {
   business: BusinessRow;
   session: Session;
   actor: string;
+  /** The signed-in user's role in this business. */
+  role: TeamRole;
+  /** What the role allows: write records, decide approvals / manage settings, manage the team. */
+  can: { write: boolean; manage: boolean; owner: boolean };
   /** Apply a deterministic change and save it. Shows a toast and returns undefined on failure. */
   run: <T>(fn: (draft: BizPilotDB, actor: string) => T, success?: string) => T | undefined;
   /** Call the BizPilot server, then refresh data. */
@@ -62,7 +66,14 @@ export function BizPilotProvider({
   const dbRef = useRef(db);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const pending = useRef(0);
+  const versions = useRef<Versions>(new Map());
+  const versionsReady = useRef(false);
   const actor = session.user.email ?? 'owner';
+  const role: TeamRole = business.role ?? 'owner';
+  const can = useMemo(
+    () => ({ write: role !== 'viewer', manage: role === 'owner' || role === 'manager', owner: role === 'owner' }),
+    [role],
+  );
 
   const replace = (next: BizPilotDB) => {
     dbRef.current = next;
@@ -73,8 +84,13 @@ export function BizPilotProvider({
     if (pending.current > 0) return; // don't clobber unsaved local changes
     setSyncing(true);
     try {
-      const fresh = await loadSnapshot(supa, business);
-      if (pending.current === 0) replace(fresh);
+      const v: Versions = new Map();
+      const fresh = await loadSnapshot(supa, business, v);
+      if (pending.current === 0) {
+        versions.current = v;
+        versionsReady.current = true;
+        replace(fresh);
+      }
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -82,8 +98,45 @@ export function BizPilotProvider({
     }
   }, [supa, business]);
 
+  /**
+   * Save prev→draft in one transaction. If someone else saved a newer version of a
+   * touched record meanwhile, reload and redo the same change on the fresh data
+   * (so stock is never double-counted), up to 3 times.
+   */
+  const commit = useCallback(
+    async <T,>(prev: BizPilotDB, draft: BizPilotDB, fn: (draft: BizPilotDB, actor: string) => T) => {
+      if (!versionsReady.current) {
+        // First save before any versioned load: get the current versions first.
+        const v: Versions = new Map();
+        await loadSnapshot(supa, business, v);
+        versions.current = v;
+        versionsReady.current = true;
+      }
+      let base = prev;
+      let next = draft;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await commitDiff(supa, business.id, base, next, versions.current);
+          return;
+        } catch (e) {
+          if (!(e instanceof ConflictError) || attempt >= 4) throw e;
+          const v: Versions = new Map();
+          base = await loadSnapshot(supa, business, v);
+          versions.current = v;
+          next = structuredClone(base);
+          fn(next, actor); // a real business rule (e.g. not enough stock now) throws here
+        }
+      }
+    },
+    [supa, business, actor],
+  );
+
   const run = useCallback(
     <T,>(fn: (draft: BizPilotDB, actor: string) => T, success?: string): T | undefined => {
+      if (role === 'viewer') {
+        toast.error('You have view-only access. Ask the owner for staff access to make changes.');
+        return undefined;
+      }
       const prev = dbRef.current;
       const draft = structuredClone(prev);
       let result: T;
@@ -96,7 +149,7 @@ export function BizPilotProvider({
       replace(draft);
       pending.current += 1;
       saveChain.current = saveChain.current
-        .then(() => persistDiff(supa, business.id, prev, draft))
+        .then(() => commit(prev, draft, fn))
         .then(() => {
           if (success) toast.success(success);
         })
@@ -109,7 +162,7 @@ export function BizPilotProvider({
         });
       return result;
     },
-    [supa, business.id, actor, reload],
+    [actor, reload, commit, role],
   );
 
   const callServer = useCallback(
@@ -148,6 +201,8 @@ export function BizPilotProvider({
       business,
       session,
       actor,
+      role,
+      can,
       run,
       callServer,
       reload,
@@ -172,7 +227,7 @@ export function BizPilotProvider({
         await supa.auth.signOut();
       },
     }),
-    [db, business, session, actor, run, callServer, reload, syncing, supa],
+    [db, business, session, actor, role, can, run, callServer, reload, syncing, supa],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -186,13 +241,23 @@ export function useBizPilot(): Store {
 
 // ------------------------------------------------------------------ bootstrapping
 
+/** The business this user owns, or the one they were invited to as a team member. */
 export async function fetchBusiness(userId: string): Promise<BusinessRow | null> {
   const supa = getSupabase()!;
   const { data, error } = await supa.from('businesses').select('*').eq('owner_id', userId).maybeSingle();
   if (error) throw new Error(error.message.includes('does not exist')
     ? 'The database tables are missing. Run supabase/schema.sql in the Supabase SQL Editor (see SUPABASE_SETUP.md).'
     : error.message);
-  return (data as BusinessRow | null) ?? null;
+  if (data) return { ...(data as BusinessRow), role: 'owner' };
+
+  // Team member: link a pending invite for this email, then load that business.
+  const accepted = await supa.rpc('accept_business_invite');
+  if (accepted.error) return null; // team roles not installed yet (supabase/industrial.sql)
+  const { data: m } = await supa.from('business_members').select('business_id, role').eq('user_id', userId).maybeSingle();
+  if (!m) return null;
+  const { data: b, error: bErr } = await supa.from('businesses').select('*').eq('id', m.business_id).maybeSingle();
+  if (bErr) throw new Error(bErr.message);
+  return b ? { ...(b as BusinessRow), role: m.role as TeamRole } : null;
 }
 
 export async function createBusiness(userId: string, settings: Partial<BusinessSettings>): Promise<BusinessRow> {

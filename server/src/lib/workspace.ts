@@ -1,12 +1,14 @@
 import type { BizPilotDB } from '../../../src/lib/db/types.ts';
-import { loadSnapshot, persistDiff, type BusinessRow } from '../../../src/lib/db/remote.ts';
+import { commitDiff, ConflictError, loadSnapshot, type BusinessRow, type Versions } from '../../../src/lib/db/remote.ts';
 import { supabaseAdmin } from './supabase.ts';
 
 /**
  * Server-side unit of work: load the business's current records, apply a
  * change with the shared deterministic operations, and save the difference.
- * Changes for the same business run one at a time so two agents or webhooks
- * can't overwrite each other's stock updates.
+ * Changes for the same business run one at a time on this server, and every
+ * save is one version-checked database transaction: if the web app (or anyone
+ * else) saved a newer version of a touched record in the meantime, the change
+ * is redone on fresh data instead of overwriting it.
  */
 
 const locks = new Map<string, Promise<unknown>>();
@@ -31,11 +33,19 @@ export async function withBusiness<T>(businessId: string, fn: (draft: BizPilotDB
   locks.set(businessId, chained);
   await prevLock.catch(() => undefined);
   try {
-    const before = await readSnapshot(businessId);
-    const draft = structuredClone(before);
-    const result = await fn(draft);
-    await persistDiff(supabaseAdmin(), businessId, before, draft);
-    return result;
+    const business = await getBusiness(businessId);
+    for (let attempt = 1; ; attempt++) {
+      const versions: Versions = new Map();
+      const before = await loadSnapshot(supabaseAdmin(), business, versions);
+      const draft = structuredClone(before);
+      const result = await fn(draft);
+      try {
+        await commitDiff(supabaseAdmin(), businessId, before, draft, versions);
+        return result;
+      } catch (e) {
+        if (!(e instanceof ConflictError) || attempt >= 4) throw e;
+      }
+    }
   } finally {
     release();
     if (locks.get(businessId) === chained) locks.delete(businessId);

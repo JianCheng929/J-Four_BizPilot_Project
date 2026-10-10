@@ -135,7 +135,7 @@ function Preview({ a, db }: { a: ApprovalRequest; db: BizPilotDB }) {
 }
 
 export function Approvals() {
-  const { db, approve, reject } = useBizPilot();
+  const { db, approve, reject, can, role } = useBizPilot();
   const [busy, setBusy] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<'all' | ApprovalType>('all');
   const [auditQ, setAuditQ] = useState('');
@@ -209,11 +209,12 @@ export function Approvals() {
                       Requested by {a.requestedBy} · {fmtDateTime(a.createdAt)}
                     </div>
                   </div>
-                  <div className="flex shrink-0 gap-2">
-                    <Button size="sm" variant="outline" disabled={!!busy} onClick={() => act(a.id, reject)}>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    {!can.manage && <span className="text-xs text-slate-500">Only the owner or a manager can decide ({role} access)</span>}
+                    <Button size="sm" variant="outline" disabled={!!busy || !can.manage} onClick={() => act(a.id, reject)}>
                       <X className="mr-1 h-4 w-4" /> Reject
                     </Button>
-                    <Button size="sm" className={primaryBtn} disabled={!!busy} onClick={() => act(a.id, approve)}>
+                    <Button size="sm" className={primaryBtn} disabled={!!busy || !can.manage} onClick={() => act(a.id, approve)}>
                       {busy === a.id ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Check className="mr-1 h-4 w-4" />}
                       Approve
                     </Button>

@@ -3,6 +3,7 @@ import { createSdkMcpServer, tool } from '@tencent-ai/agent-sdk';
 import * as ops from '../../../src/lib/ops.ts';
 import * as m from '../../../src/lib/metrics.ts';
 import { checkCompliance } from '../../../src/lib/compliance.ts';
+import { periodReport } from '../../../src/lib/reports.ts';
 import type { AgentEvent, ApprovalRequest, BizPilotDB, ContentItem } from '../../../src/lib/db/types.ts';
 import { readSnapshot, withBusiness } from '../lib/workspace.ts';
 import { executeApproval } from '../lib/execute.ts';
@@ -15,6 +16,7 @@ import { PROVIDERS } from '../providers/index.ts';
 import { isConfigured, providerContext } from '../lib/integrations.ts';
 import { generateImage } from '../lib/media.ts';
 import { finishKlingVideo, klingConfigured, startKlingVideo } from '../lib/kling.ts';
+import { injectionFlag, untrusted } from './untrusted.ts';
 
 /**
  * BizPilot's tools, exposed to the WorkBuddy agent as an in-process MCP server.
@@ -151,7 +153,7 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       safe(async () => {
         const db = await readSnapshot(businessId);
         return {
-          returns: db.returns.slice(0, 50).map((r) => ({ ...r, product: db.products.find((p) => p.id === r.productId)?.name ?? null })),
+          returns: db.returns.slice(0, 50).map((r) => ({ ...r, customerName: untrusted(r.customerName), notes: untrusted(r.notes), ...injectionFlag(r.notes), product: db.products.find((p) => p.id === r.productId)?.name ?? null })),
           patterns: m.returnStats(db),
         };
       })),
@@ -175,6 +177,20 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       safe(async ({ days }) => {
         const p = m.profitAndLoss(await readSnapshot(businessId), days);
         return Object.fromEntries(Object.entries(p).map(([k, v]) => [k, r2(v)]));
+      })),
+
+    tool('business_report', 'Report for any date range (YYYY-MM-DD, inclusive) with optional channel, source or product filter: orders, revenue, cost of goods, gross and net profit, comparison with the previous period of the same length, sales by channel/source, products ranked by gross profit, expenses by category, daily series and data notes (assumptions and missing data). Quote the notes when you report.',
+      {
+        from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        channel: z.enum(['all', 'online', 'retail']).default('all'),
+        source: z.enum(['all', 'manual', 'pos', 'shopee', 'lazada', 'tiktok_shop']).default('all'),
+        product: z.string().optional().describe('Product id, SKU or name to report on one product'),
+      },
+      safe(async ({ from, to, channel, source, product }) => {
+        const db = await readSnapshot(businessId);
+        const productId = product ? ops.requireProduct(db, product).id : null;
+        const r = periodReport(db, { from, to, channel, source, productId });
+        return { ...r, products: r.products.slice(0, 20), daily: r.days > 62 ? undefined : r.daily };
       })),
 
     tool('list_suppliers', 'Suppliers with cost, MOQ, lead time and performance from purchase history.', {},
@@ -216,12 +232,15 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       safe(async ({ status, sentiment }) => {
         const db = await readSnapshot(businessId);
         return db.reviews.filter((r) => (!status || r.status === status) && (!sentiment || r.sentiment === sentiment)).slice(0, 50).map((r) => ({
-          id: r.id, source: r.source, rating: r.rating, customer: r.customerName, text: r.text, sentiment: r.sentiment, topic: r.topic, status: r.status, product: db.products.find((p) => p.id === r.productId)?.name ?? null, draftResponse: r.draftResponse ?? null,
+          id: r.id, source: r.source, rating: r.rating, customer: untrusted(r.customerName), text: untrusted(r.text), sentiment: r.sentiment, topic: r.topic, status: r.status, product: db.products.find((p) => p.id === r.productId)?.name ?? null, draftResponse: r.draftResponse ?? null,
+          ...injectionFlag(r.text, r.customerName),
         }));
       })),
 
     tool('list_tickets', 'Support tickets.', { status: z.string().optional() },
-      safe(async ({ status }) => (await readSnapshot(businessId)).tickets.filter((t) => !status || t.status === status).slice(0, 50))),
+      safe(async ({ status }) => (await readSnapshot(businessId)).tickets.filter((t) => !status || t.status === status).slice(0, 50).map((t) => ({
+        ...t, subject: untrusted(t.subject), body: untrusted(t.body), customerName: untrusted(t.customerName), ...injectionFlag(t.subject, t.body),
+      })))),
 
     tool('list_marketing', 'Content calendar items and campaigns with performance (ROAS).', {},
       safe(async () => {

@@ -4,6 +4,20 @@
 
 export type BusinessMode = 'online' | 'retail' | 'hybrid';
 
+/** Blueprint §17 role-based access: owner > manager (approvals, settings) > staff (day-to-day records) > viewer (read only). */
+export type TeamRole = 'owner' | 'manager' | 'staff' | 'viewer';
+
+export interface TeamMember {
+  id: string;
+  businessId: string;
+  userId: string | null;
+  email: string;
+  role: Exclude<TeamRole, 'owner'>;
+  invitedBy: string;
+  invitedAt: string;
+  acceptedAt: string | null;
+}
+
 export interface BusinessSettings {
   name: string;
   mode: BusinessMode;
@@ -322,7 +336,7 @@ export interface ApprovalRequest {
   amount?: number | null; // financial exposure if any
   risk: 'low' | 'medium' | 'high';
   status: 'pending' | 'approved' | 'rejected';
-  executionStatus?: 'not_started' | 'succeeded' | 'failed' | null;
+  executionStatus?: 'not_started' | 'running' | 'succeeded' | 'failed' | null;
   executionResult?: string | null;
   requestedBy: string;
   createdAt: string;

@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { requireUser, ctx } from '../lib/auth.ts';
+import { requireRole, requireUser, ctx } from '../lib/auth.ts';
+import { rateLimit } from '../lib/ratelimit.ts';
 import { handle, HttpError } from '../lib/http.ts';
 import { supabaseAdmin } from '../lib/supabase.ts';
 import { fromRow } from '../../../src/lib/db/remote.ts';
@@ -21,7 +22,7 @@ agent.get('/status', requireUser, handle(async (req) => {
   return status();
 }));
 
-agent.post('/tasks', requireUser, handle(async (req) => {
+agent.post('/tasks', requireUser, requireRole('staff'), rateLimit({ name: 'agent goals', windowMs: 10 * 60_000, max: 30 }), handle(async (req) => {
   const prompt = String(req.body?.prompt ?? '').trim();
   if (!prompt) throw new HttpError(400, 'Tell WorkBuddy what you want done.');
   if (prompt.length > 4000) throw new HttpError(400, 'Keep the goal under 4000 characters.');
@@ -40,7 +41,7 @@ agent.get('/tasks/:id', requireUser, handle(async (req) => {
   return fromRow<AgentTask>('agentTasks', data as Record<string, unknown>);
 }));
 
-agent.post('/tasks/:id/cancel', requireUser, handle(async (req) => {
+agent.post('/tasks/:id/cancel', requireUser, requireRole('staff'), handle(async (req) => {
   if (!cancelTask(String(req.params.id), ctx(req).business.id)) throw new HttpError(400, 'That task is not running.');
   return { ok: true };
 }));
@@ -83,7 +84,7 @@ agent.get('/conversations/:id', requireUser, handle(async (req) => {
   return (data ?? []).map((row) => getLiveTask(String(row.id), businessId) ?? fromRow<AgentTask>('agentTasks', row as Record<string, unknown>));
 }));
 
-agent.delete('/conversations/:id', requireUser, handle(async (req) => {
+agent.delete('/conversations/:id', requireUser, requireRole('staff'), handle(async (req) => {
   const businessId = ctx(req).business.id;
   const id = chatId(req.params.id);
   const { error } = await supabaseAdmin()

@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { BizPilotDB, BusinessSettings } from './types';
+import type { BizPilotDB, BusinessSettings, TeamRole } from './types';
 import { defaultSettings, emptyDB, normalizeRecord } from './defaults';
 
 /**
@@ -52,7 +52,7 @@ export function toRow(obj: object, businessId: string): Record<string, unknown> 
 export function fromRow<T>(collection: CollectionKey, row: Record<string, unknown>): T {
   const obj: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
-    if (k === 'business_id') continue;
+    if (k === 'business_id' || k === 'row_version') continue;
     obj[toCamel(k)] = v;
   }
   return normalizeRecord(collection, obj) as T;
@@ -64,16 +64,42 @@ export interface BusinessRow {
   name: string;
   mode: BusinessSettings['mode'];
   settings: Partial<BusinessSettings>;
+  row_version?: number;
+  /** Set by the app when loading: the signed-in user's role. Never saved. */
+  role?: TeamRole;
+}
+
+/**
+ * Last saved row_version of every loaded record, keyed "table:id" ("businesses:<id>" for settings).
+ * Saves send these so the database can refuse to overwrite a newer change.
+ */
+export type Versions = Map<string, number>;
+export const versionKey = (table: string, id: string) => `${table}:${id}`;
+
+/** Someone else saved a newer version of a record this save touches. Reload and redo the change. */
+export class ConflictError extends Error {
+  constructor(message = 'Another change was saved at the same time.') {
+    super(message);
+    this.name = 'ConflictError';
+  }
 }
 
 export function settingsFromBusiness(b: BusinessRow): BusinessSettings {
   return { ...defaultSettings, ...(b.settings ?? {}), name: b.name, mode: b.mode };
 }
 
-/** Load every collection for one business into the in-memory BizPilotDB shape. */
-export async function loadSnapshot(client: SupabaseClient, business: BusinessRow): Promise<BizPilotDB> {
+/**
+ * Load every collection for one business into the in-memory BizPilotDB shape.
+ * The business row is re-read too, so settings changed elsewhere show up.
+ * Pass `versions` to receive each record's row_version.
+ */
+export async function loadSnapshot(client: SupabaseClient, business: BusinessRow, versions?: Versions): Promise<BizPilotDB> {
   const db = emptyDB();
-  db.settings = settingsFromBusiness(business);
+  const { data: fresh, error: bErr } = await client.from('businesses').select('*').eq('id', business.id).maybeSingle();
+  if (bErr) throw new Error(`Loading business: ${bErr.message}`);
+  const b = (fresh as BusinessRow | null) ?? business;
+  db.settings = settingsFromBusiness(b);
+  if (versions && typeof b.row_version === 'number') versions.set(versionKey('businesses', business.id), b.row_version);
   const keys = Object.keys(TABLES) as CollectionKey[];
   const results = await Promise.all(
     keys.map(async (key) => {
@@ -83,6 +109,11 @@ export async function loadSnapshot(client: SupabaseClient, business: BusinessRow
       if (cfg.limit) q = q.limit(cfg.limit);
       const { data, error } = await q;
       if (error) throw new Error(`Loading ${cfg.table}: ${error.message}`);
+      if (versions) {
+        for (const r of (data ?? []) as Record<string, unknown>[]) {
+          if (typeof r.row_version === 'number') versions.set(versionKey(cfg.table, String(r.id)), r.row_version);
+        }
+      }
       return [key, (data ?? []).map((r) => fromRow(key, r as Record<string, unknown>))] as const;
     }),
   );
@@ -139,5 +170,68 @@ export async function persistDiff(
   for (const [key, ids] of Object.entries(diff.deletes) as [CollectionKey, string[]][]) {
     const { error } = await client.from(TABLES[key].table).delete().in('id', ids).eq('business_id', businessId);
     if (error) throw new Error(`Deleting from ${TABLES[key].table}: ${error.message}`);
+  }
+}
+
+interface Change {
+  table: string;
+  op: 'upsert' | 'delete' | 'settings';
+  id: string;
+  version: number | null;
+  row?: Record<string, unknown>;
+}
+
+let legacyWarned = false;
+
+/**
+ * Save the difference between two snapshots in ONE database transaction
+ * (supabase/industrial.sql → bizpilot_commit). Each changed record is saved only
+ * if nobody saved a newer version since it was loaded; otherwise nothing is saved
+ * and ConflictError is thrown so the caller can reload and redo the change.
+ * Falls back to the older row-by-row save if the function isn't installed yet.
+ */
+export async function commitDiff(
+  client: SupabaseClient,
+  businessId: string,
+  prev: BizPilotDB,
+  next: BizPilotDB,
+  versions: Versions,
+): Promise<void> {
+  const diff = diffSnapshots(prev, next);
+  const changes: Change[] = [];
+  if (diff.settingsChanged) {
+    const { name, mode, ...rest } = next.settings;
+    changes.push({ table: 'businesses', op: 'settings', id: businessId, version: versions.get(versionKey('businesses', businessId)) ?? null, row: { name, mode, settings: rest } });
+  }
+  for (const [key, rows] of Object.entries(diff.upserts) as [CollectionKey, { id: string }[]][]) {
+    const table = TABLES[key].table;
+    for (const r of rows) {
+      changes.push({ table, op: 'upsert', id: r.id, version: versions.get(versionKey(table, r.id)) ?? null, row: toRow(r, businessId) });
+    }
+  }
+  for (const [key, ids] of Object.entries(diff.deletes) as [CollectionKey, string[]][]) {
+    const table = TABLES[key].table;
+    for (const id of ids) changes.push({ table, op: 'delete', id, version: versions.get(versionKey(table, id)) ?? null });
+  }
+  if (!changes.length) return;
+
+  const { data, error } = await client.rpc('bizpilot_commit', { p_business: businessId, p_changes: changes });
+  if (error) {
+    if (error.code === 'PGRST202' || error.code === '42883') {
+      if (!legacyWarned) {
+        legacyWarned = true;
+        console.warn('bizpilot_commit is not installed: run supabase/industrial.sql. Saving row by row without conflict checks.');
+      }
+      return persistDiff(client, businessId, prev, next);
+    }
+    if (error.code === '40001' || error.code === '23505' || /bizpilot_conflict/.test(error.message)) {
+      throw new ConflictError(error.message.replace(/^bizpilot_conflict:\s*/, ''));
+    }
+    throw new Error(`Not saved: ${error.message}`);
+  }
+  for (const v of (data ?? []) as { table: string; id: string; version: number | null }[]) {
+    const k = versionKey(v.table, v.id);
+    if (v.version === null) versions.delete(k);
+    else versions.set(k, v.version);
   }
 }

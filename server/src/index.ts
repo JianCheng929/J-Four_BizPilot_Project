@@ -15,6 +15,7 @@ import { pos, tokens } from './routes/pos.ts';
 import { admin } from './routes/admin.ts';
 import { media } from './routes/media.ts';
 import { startAutopilot } from './lib/autopilot.ts';
+import { rateLimit } from './lib/ratelimit.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -29,6 +30,10 @@ const allowedOrigin = (o: string) =>
 
 app.use(cors({ origin: (origin, cb) => cb(null, !origin || allowedOrigin(origin)) }));
 app.use(express.json({ limit: '1mb' }));
+// Render sits behind one proxy; trust it so req.ip is the caller's address.
+app.set('trust proxy', 1);
+app.use('/api', rateLimit({ name: 'api', windowMs: 60_000, max: 300, key: (req) => req.ip ?? 'unknown' }));
+app.use('/admin', rateLimit({ name: 'admin', windowMs: 15 * 60_000, max: 600, key: (req) => req.ip ?? 'unknown' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true, supabase: isSupabaseConfigured() }));
 

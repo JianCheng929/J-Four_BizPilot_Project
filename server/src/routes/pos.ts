@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Router, type Request } from 'express';
 import * as ops from '../../../src/lib/ops.ts';
-import { requireUser, ctx } from '../lib/auth.ts';
+import { requireRole, requireUser, ctx } from '../lib/auth.ts';
 import { handle, HttpError } from '../lib/http.ts';
 import { supabaseAdmin } from '../lib/supabase.ts';
 import { withBusiness } from '../lib/workspace.ts';
@@ -17,13 +17,13 @@ export const pos = Router();
 
 const hash = (t: string) => createHash('sha256').update(t).digest('hex');
 
-tokens.get('/', requireUser, handle(async (req) => {
+tokens.get('/', requireUser, requireRole('manager'), handle(async (req) => {
   const { data, error } = await supabaseAdmin().from('api_tokens').select('id,name,token_hint,created_at,last_used_at').eq('business_id', ctx(req).business.id);
   if (error) throw new Error(error.message);
   return data;
 }));
 
-tokens.post('/', requireUser, handle(async (req) => {
+tokens.post('/', requireUser, requireRole('manager'), handle(async (req) => {
   const token = `bp_${randomBytes(24).toString('base64url')}`;
   const name = String(req.body?.name ?? 'POS').slice(0, 60) || 'POS';
   const { error } = await supabaseAdmin().from('api_tokens').insert({ business_id: ctx(req).business.id, name, token_hash: hash(token), token_hint: `${token.slice(0, 7)}…${token.slice(-4)}` });
@@ -31,7 +31,7 @@ tokens.post('/', requireUser, handle(async (req) => {
   return { token, name, note: 'Copy this token now. BizPilot only stores a hash of it.' };
 }));
 
-tokens.delete('/:id', requireUser, handle(async (req) => {
+tokens.delete('/:id', requireUser, requireRole('manager'), handle(async (req) => {
   const { error } = await supabaseAdmin().from('api_tokens').delete().eq('id', String(req.params.id)).eq('business_id', ctx(req).business.id);
   if (error) throw new Error(error.message);
   return { ok: true };

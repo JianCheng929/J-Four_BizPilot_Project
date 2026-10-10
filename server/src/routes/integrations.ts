@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Router } from 'express';
-import { requireUser, ctx } from '../lib/auth.ts';
+import { requireRole, requireUser, ctx } from '../lib/auth.ts';
 import { handle, HttpError, contextFor } from '../lib/http.ts';
 import { getIntegrationRow, isConfigured, providerContext, upsertIntegration, serverUrl } from '../lib/integrations.ts';
 import { PROVIDERS } from '../providers/index.ts';
@@ -80,6 +80,7 @@ integrations.get(
 integrations.put(
   '/:id',
   requireUser,
+  requireRole('manager'),
   handle(async (req) => {
     const businessId = ctx(req).business.id;
     const { provider } = await contextFor(businessId, String(req.params.id));
@@ -101,6 +102,7 @@ integrations.put(
 integrations.post(
   '/:id/test',
   requireUser,
+  requireRole('manager'),
   handle(async (req) => {
     const businessId = ctx(req).business.id;
     const { provider, pctx } = await contextFor(businessId, String(req.params.id));
@@ -119,6 +121,7 @@ integrations.post(
 integrations.delete(
   '/:id',
   requireUser,
+  requireRole('manager'),
   handle(async (req) => {
     const businessId = ctx(req).business.id;
     const { error } = await supabaseAdmin().from('integrations').delete().eq('business_id', businessId).eq('provider_id', String(req.params.id));
@@ -131,6 +134,7 @@ integrations.delete(
 integrations.post(
   '/:id/connect',
   requireUser,
+  requireRole('manager'),
   handle(async (req) => {
     const businessId = ctx(req).business.id;
     const { provider, pctx } = await contextFor(businessId, String(req.params.id));

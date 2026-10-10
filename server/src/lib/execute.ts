@@ -90,16 +90,35 @@ async function externalEffect(businessId: string, db: BizPilotDB, req: ApprovalR
   }
 }
 
-const running = new Set<string>();
+const RUNNING = 'Running since ';
+const STALE_MS = 10 * 60_000;
+
+/**
+ * Durably mark an approval as running before its external effect (book, submit, send),
+ * in a version-checked save. Two clicks, two tabs or two servers can't both claim it,
+ * so the same courier booking or e-invoice is never sent twice.
+ */
+async function claimApproval(businessId: string, approvalId: string): Promise<void> {
+  await withBusiness(businessId, (db) => {
+    const r = db.approvals.find((a) => a.id === approvalId);
+    if (!r) throw new HttpError(404, 'Approval not found.');
+    if (r.status !== 'pending') throw new HttpError(400, `This request was already ${r.status}.`);
+    if (r.executionStatus === 'running') {
+      const since = Date.parse(String(r.executionResult ?? '').replace(RUNNING, ''));
+      if (!Number.isFinite(since) || Date.now() - since < STALE_MS) {
+        throw new HttpError(409, 'This approval is already being executed.');
+      }
+    }
+    r.executionStatus = 'running';
+    r.executionResult = `${RUNNING}${new Date().toISOString()}`;
+  });
+}
 
 export async function executeApproval(businessId: string, approvalId: string, actor: string): Promise<{ result: string }> {
-  if (running.has(approvalId)) throw new HttpError(409, 'This approval is already being executed.');
-  running.add(approvalId);
-  try {
+  await claimApproval(businessId, approvalId);
+  {
     const snap = await readSnapshot(businessId);
-    const req = snap.approvals.find((a) => a.id === approvalId);
-    if (!req) throw new HttpError(404, 'Approval not found.');
-    if (req.status !== 'pending') throw new HttpError(400, `This request was already ${req.status}.`);
+    const req = snap.approvals.find((a) => a.id === approvalId)!;
 
     let external: Record<string, unknown>;
     try {
@@ -114,7 +133,7 @@ export async function executeApproval(businessId: string, approvalId: string, ac
       throw new HttpError(400, `Not executed: ${msg}`);
     }
 
-    const out = await withBusiness(businessId, (db) => {
+    const record = (db: BizPilotDB) => {
       const r = db.approvals.find((a) => a.id === approvalId)!;
       const result = ops.applyApprovedAction(db, r, actor, external);
       r.status = 'approved';
@@ -129,7 +148,20 @@ export async function executeApproval(businessId: string, approvalId: string, ac
       }
       const po = r.type === 'purchase_order' ? db.purchaseOrders.find((x) => x.poNumber === result.split(' ')[0]) : undefined;
       return { result, po: po ? { po, text: purchaseOrderText(po, db), supplier: db.suppliers.find((s) => s.id === po.supplierId) } : null };
-    });
+    };
+    let out: ReturnType<typeof record>;
+    try {
+      out = await withBusiness(businessId, record);
+    } catch (e) {
+      const done = Object.keys(external).length ? ` The external step already happened (${JSON.stringify(external).slice(0, 200)}); check it before retrying.` : '';
+      const msg = `${(e as Error).message}${done}`;
+      await withBusiness(businessId, (db) => {
+        const r = db.approvals.find((a) => a.id === approvalId);
+        if (r) { r.executionStatus = 'failed'; r.executionResult = msg; }
+        ops.audit(db, actor, 'execute_failed', 'approval', approvalId, `${req.title}: ${msg}`);
+      });
+      throw new HttpError(400, `Not executed: ${msg}`);
+    }
 
     // After a PO is placed, send it to the supplier if email is set up.
     if (out.po?.supplier?.email) {
@@ -150,8 +182,6 @@ export async function executeApproval(businessId: string, approvalId: string, ac
       }
     }
     return { result: out.result };
-  } finally {
-    running.delete(approvalId);
   }
 }
 

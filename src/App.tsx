@@ -16,6 +16,7 @@ import { Finance } from '@/pages/Finance';
 import { Customers } from '@/pages/Customers';
 import { Approvals } from '@/pages/Approvals';
 import { Settings } from '@/pages/Settings';
+import { Reports } from '@/pages/Reports';
 import { Onboarding } from '@/pages/Onboarding';
 import { Login } from '@/pages/Login';
 
@@ -32,6 +33,7 @@ function Shell() {
       {page === 'finance' && <Finance />}
       {page === 'customers' && <Customers />}
       {page === 'approvals' && <Approvals />}
+      {page === 'reports' && <Reports onNavigate={setPage} />}
       {page === 'settings' && <Settings />}
     </AppShell>
   );

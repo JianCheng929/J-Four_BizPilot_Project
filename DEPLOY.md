@@ -58,6 +58,15 @@ In Supabase → SQL Editor, run these two files (both are safe to re-run):
 - `supabase/marketing-media.sql`: storage for uploaded and AI-generated images and videos.
 - `supabase/team-features.sql`: held stock, expiry date, safety/max stock, pack size, and returns.
 
+## 7b. Team roles and safe saves (once, after section 7)
+
+Run `supabase/industrial.sql` in the Supabase SQL Editor. Safe to re-run; it keeps your data. It adds:
+- Team roles (owner, manager, staff, viewer) in Settings → Team & data. Invited people sign up with the invited email and land in your business.
+- One-transaction, version-checked saves, so two people, the AI agent and marketplace syncs can't overwrite each other or oversell stock.
+- An append-only audit log, a database guard against negative stock, and a guard against importing the same marketplace order twice.
+
+Until it is run, the app still works but saves row by row without conflict checks, and team roles are off.
+
 ## 8. AI images and videos
 - Images: add `GEMINI_API_KEY` on Render (free key from aistudio.google.com/apikey; image generation is billed per image), or `OPENAI_API_KEY`, or the Kling keys below. Without a key a free, low-quality service is used and it often refuses with error 402.
 - Real motion video uses Kling AI: in Render → Environment add `KLING_ACCESS_KEY` and

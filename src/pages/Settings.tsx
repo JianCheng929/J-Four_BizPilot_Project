@@ -15,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import { DataExportCard, TeamCard } from '@/components/bizpilot/TeamCard';
 
 // ---------------------------------------------------------------- types from the server
 
@@ -460,11 +461,13 @@ export function Settings() {
           <TabsTrigger value="profile">Business profile</TabsTrigger>
           <TabsTrigger value="integrations">Integrations</TabsTrigger>
           <TabsTrigger value="pos">POS</TabsTrigger>
+          <TabsTrigger value="team">Team &amp; data</TabsTrigger>
         </TabsList>
         <TabsContent value="workbuddy"><WorkBuddyCard /></TabsContent>
         <TabsContent value="profile"><ProfileForm /></TabsContent>
         <TabsContent value="integrations"><Integrations /></TabsContent>
         <TabsContent value="pos"><PosTokens /></TabsContent>
+        <TabsContent value="team" className="space-y-4"><TeamCard /><DataExportCard /></TabsContent>
       </Tabs>
     </div>
   );

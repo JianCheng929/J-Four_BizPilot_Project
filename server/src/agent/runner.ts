@@ -1,3 +1,4 @@
+import { UNTRUSTED_RULES } from './untrusted.ts';
 import { query } from '@tencent-ai/agent-sdk';
 import type { AgentEvent, AgentTask } from '../../../src/lib/db/types.ts';
 import { newId } from '../../../src/lib/db/defaults.ts';
@@ -51,6 +52,8 @@ How to work:
 6. Brand voice: ${biz.voice || 'friendly, clear, professional'}. Audience: ${biz.audience || 'Malaysian customers'}. Never use these claims: ${biz.banned || 'none set'}. Reply to customers in the language they wrote in (English, Malay or Chinese).
 7. ${skillsIndex()}
 8. Finish with a concise summary for the owner: what you found (with the real figures), what you did (record numbers), and which approvals are waiting for them. Use plain language, no markdown tables.
+
+${UNTRUSTED_RULES}
 `.trim();
 
 function push(l: Live, e: Omit<AgentEvent, 'at'>) {

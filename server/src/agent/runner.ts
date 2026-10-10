@@ -19,13 +19,21 @@ interface Live {
 }
 const live = new Map<string, Live>();
 
+const WEB_TOOLS = ['WebSearch', 'WebFetch'];
+
 const SYSTEM_PROMPT = (biz: { name: string; mode: string; level: number; limit: number; voice: string; audience: string; banned: string }) => `
 You are BizPilot's operations agent for "${biz.name}", a Malaysian SME (${biz.mode} business, currency RM, timezone Asia/Kuala_Lumpur).
-You run on WorkBuddy and act ONLY through the mcp__bizpilot__* tools, which read and change this business's real records.
+You run on WorkBuddy. You change and read this business's real records ONLY through the mcp__bizpilot__* tools.
+For outside information (finding suppliers, market prices, competitors, regulations, trends) use WebSearch and WebFetch.
+
+Web research rules:
+- Answer the owner's question directly with what you find; do not refuse because the data is not in BizPilot.
+- Give each fact its source link. Only state contact numbers, emails, addresses and opening hours that a page you fetched actually shows; if hours are not published, say "not listed" and give the source to check.
+- Never present web findings as the business's own records. Offer to save a supplier with create_supplier only if the owner asks.
 
 How to work:
 1. For any goal with more than one step, call share_plan first with a short numbered plan.
-2. Gather facts with read tools before acting (get_business_overview is a good start). Never invent numbers, products, suppliers or customers: if data is missing, say so and suggest what the owner should add.
+2. Gather facts with read tools before acting (get_business_overview is a good start). Never invent numbers, products, suppliers or customers in the business's records: if data is missing, say so and suggest what the owner should add.
 3. Execute the plan with tools. If a tool returns ERROR, read it, fix the input or choose another route, and continue.
 4. Money, prices, publishing, customer/supplier messages, e-invoices, courier bookings and stock corrections always go through approval tools (draft_purchase_order, request_price_change, draft_content with requestPublish, draft_review_reply, request_customer_email, request_einvoice_submit, request_shipment_booking, request_stock_adjustment, request_invoice_issue). Never claim something was sent, published or paid unless a tool result says so.
 5. Automation level is ${biz.level} (1 = suggest only, 2 = draft and ask for approval, 3 = low-risk routine actions may auto-execute). Approval limit RM${biz.limit}.
@@ -52,7 +60,8 @@ async function flush(l: Live) {
   if (error) console.error('agent_tasks save failed', error.message);
 }
 
-const friendly = (name: string) => name.replace(/^mcp__bizpilot__/, '').replace(/_/g, ' ');
+const friendly = (name: string) =>
+  name === 'WebSearch' ? 'web search' : name === 'WebFetch' ? 'web page reader' : name.replace(/^mcp__bizpilot__/, '').replace(/_/g, ' ');
 
 function toolResultText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -96,12 +105,12 @@ async function run(l: Live) {
         model: process.env.WORKBUDDY_MODEL || undefined,
         abortController: l.abort,
         mcpServers: { bizpilot: server },
-        tools: [], // no shell / file / web tools: BizPilot tools only
-        allowedTools: toolNames,
+        tools: WEB_TOOLS, // web research only: no shell or file access on the server
+        allowedTools: [...toolNames, ...WEB_TOOLS],
         canUseTool: async (toolName: string, input: Record<string, unknown>) =>
-          toolName.startsWith('mcp__bizpilot__')
+          toolName.startsWith('mcp__bizpilot__') || WEB_TOOLS.includes(toolName)
             ? { behavior: 'allow' as const, updatedInput: input }
-            : { behavior: 'deny' as const, message: 'Only BizPilot tools are available.' },
+            : { behavior: 'deny' as const, message: 'Only BizPilot tools and web research are available.' },
         permissionMode: 'default',
         settingSources: [],
         persistSession: false,

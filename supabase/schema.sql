@@ -8,15 +8,33 @@
 -- src/lib/db/remote.ts maps between the two automatically.
 -- ============================================================
 
--- 0. Remove the v1 tables (v1 had no real data; v2 changes their columns) ----
+-- 0. Remove tables from older BizPilot versions ---------------------------
+-- If any BizPilot table exists but is missing a column this version needs,
+-- all BizPilot tables are dropped and recreated (older versions held no real data).
 do $$
+declare
+  needs_reset boolean := false;
+  r record;
 begin
-  if exists (select 1 from information_schema.columns
-             where table_schema = 'public' and table_name = 'integrations' and column_name = 'workspace_id')
-     or exists (select 1 from information_schema.tables
-             where table_schema = 'public' and table_name = 'purchase_order_lines') then
-    drop table if exists purchase_order_lines, sales_order_lines, integrations, notifications, audit_log,
-      approval_requests, content_items, campaigns, support_tickets, reviews, invoices, expenses,
+  for r in select * from (values
+    ('businesses','settings'), ('businesses','owner_id'), ('products','channel_skus'), ('stock_movements','actor'),
+    ('suppliers','notes'), ('purchase_orders','lines'), ('sales_orders','date'), ('sales_orders','shipment'),
+    ('expenses','paid'), ('invoices','einvoice'), ('reviews','external_id'), ('support_tickets','body'),
+    ('content_items','image_url'), ('campaigns','daily_cap'), ('approval_requests','execution_status'),
+    ('audit_log','entity_id'), ('notifications','read'), ('integrations','provider_id'),
+    ('agent_tasks','events'), ('api_tokens','token_hash')
+  ) as t(tbl, col) loop
+    if exists (select 1 from information_schema.tables where table_schema = 'public' and table_name = r.tbl)
+       and not exists (select 1 from information_schema.columns
+                       where table_schema = 'public' and table_name = r.tbl and column_name = r.col) then
+      needs_reset := true;
+    end if;
+  end loop;
+  if needs_reset or exists (select 1 from information_schema.tables
+                            where table_schema = 'public' and table_name in ('purchase_order_lines','sales_order_lines')) then
+    raise notice 'Old BizPilot tables found: dropping and recreating them.';
+    drop table if exists purchase_order_lines, sales_order_lines, api_tokens, agent_tasks, integrations, notifications,
+      audit_log, approval_requests, content_items, campaigns, support_tickets, reviews, invoices, expenses,
       sales_orders, purchase_orders, stock_movements, products, suppliers, businesses cascade;
   end if;
 end $$;
@@ -353,6 +371,14 @@ end $$;
 -- Only the BizPilot server (service role key, which bypasses RLS) reads or writes them.
 alter table integrations enable row level security;
 alter table api_tokens enable row level security;
+
+-- Server-only settings, e.g. BizPilot's saved WorkBuddy login. No policy = server only.
+create table if not exists server_secrets (
+  key text primary key,
+  value text not null,
+  updated_at timestamptz not null default now()
+);
+alter table server_secrets enable row level security;
 
 -- 12. Indexes ---------------------------------------------------------------------------
 create index if not exists idx_products_biz on products (business_id);

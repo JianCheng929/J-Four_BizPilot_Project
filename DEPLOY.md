@@ -13,25 +13,31 @@ WorkBuddy account, so users never sign in to WorkBuddy.
 ## 1. Push the code to GitHub
 Create a private repo and push `C:\BizPilot` (the `.gitignore` already keeps `.env` files out).
 
-## 2. Get BizPilot's WorkBuddy token (once, on your PC)
+## 2. Add the login table in Supabase (once)
+Supabase → SQL Editor → run:
+```sql
+create table if not exists server_secrets (
+  key text primary key,
+  value text not null,
+  updated_at timestamptz not null default now()
+);
+alter table server_secrets enable row level security;
 ```
-cd server
-npm install
-npm run workbuddy:token
-```
-A browser opens; sign in with the WorkBuddy account BizPilot should use. The terminal then
-prints a token. Keep it secret; you paste it into Render in step 3.
-If the token ever expires, BizPilot shows "AI engine offline": run this again and update it on Render.
+(It is also in `supabase/schema.sql`.) No policies means only the server can read it.
 
 ## 3. Deploy the server on Render
 1. https://render.com → **New → Blueprint** → choose your repo (it reads `render.yaml`).
 2. Fill in:
    - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (Supabase → Project Settings → API)
-   - `CODEBUDDY_AUTH_TOKEN` (from step 2)
+   - `WORKBUDDY_ADMIN_KEY` = a long random password you choose (protects the sign-in page)
    - `APP_URL` = your Vercel URL from step 4 (you can come back and set it)
    - `PUBLIC_SERVER_URL` = this service's URL, e.g. `https://bizpilot-server.onrender.com`
 3. Deploy. Open `https://<your-service>.onrender.com/health`; it should show `{"ok":true,"supabase":true}`.
-   The log shows `WorkBuddy engine: online` when the token works.
+4. Sign the server in to BizPilot's WorkBuddy account: open
+   `https://<your-service>.onrender.com/admin/workbuddy`, enter the admin key, click
+   **Sign in to WorkBuddy**, open the link and sign in. The page shows **Engine: ONLINE** when done.
+   The login is saved in Supabase (`server_secrets`), so restarts and sleeps keep it, and
+   refreshed tokens are saved automatically. If BizPilot ever says "AI engine offline", sign in on that page again.
 
 ## 4. Deploy the web app on Vercel
 1. https://vercel.com → **Add New → Project** → import the same repo. Framework: Vite (auto-detected).

@@ -4,6 +4,8 @@ services:
   - type: web
     name: bizpilot-server
     runtime: docker
+    plan: free
+    region: singapore
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
@@ -11,7 +13,7 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: CODEBUDDY_AUTH_TOKEN
+      - key: WORKBUDDY_ADMIN_KEY
         sync: false
       - key: APP_URL
         sync: false

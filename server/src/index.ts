@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { isSupabaseConfigured, supabaseAdmin } from './lib/supabase.ts';
 import { publishDueContent } from './lib/execute.ts';
-import { checkEngine } from './agent/workbuddy.ts';
+import { checkEngine, restoreLogin, saveLogin } from './agent/workbuddy.ts';
 import { integrations } from './routes/integrations.ts';
 import { approvals } from './routes/approvals.ts';
 import { sync } from './routes/sync.ts';
@@ -12,12 +12,20 @@ import { einvoice } from './routes/einvoice.ts';
 import { email } from './routes/email.ts';
 import { agent } from './routes/agent.ts';
 import { pos, tokens } from './routes/pos.ts';
+import { admin } from './routes/admin.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
-const origins = (process.env.APP_URL || 'http://localhost:5173').split(',').map((s) => s.trim());
+const origins = (process.env.APP_URL || 'http://localhost:5173')
+  .split(',')
+  .map((s) => s.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+// The browser sends a Supabase bearer token (no cookies), so allowing the app's
+// own Vercel deployments is safe; every API call is still authenticated.
+const allowedOrigin = (o: string) =>
+  origins.includes(o) || /^http:\/\/localhost:\d+$/.test(o) || /^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(o);
 
-app.use(cors({ origin: (origin, cb) => cb(null, !origin || origins.includes(origin) || /^http:\/\/localhost:\d+$/.test(origin)) }));
+app.use(cors({ origin: (origin, cb) => cb(null, !origin || allowedOrigin(origin)) }));
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true, supabase: isSupabaseConfigured() }));
@@ -31,6 +39,7 @@ app.use('/api/email', email);
 app.use('/api/agent', agent);
 app.use('/api/tokens', tokens);
 app.use('/api/pos', pos);
+app.use('/admin', admin);
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -40,9 +49,13 @@ if (!isSupabaseConfigured()) {
 
 app.listen(PORT, async () => {
   console.log(`BizPilot server on http://localhost:${PORT}`);
+  // Cloud disks are wiped on restart: put the saved WorkBuddy login back before first use.
+  await restoreLogin().catch((e) => console.error(e));
   checkEngine(true).then((h) =>
-    console.log(h.online ? 'WorkBuddy engine: online' : `WorkBuddy engine: OFFLINE — ${h.error}\n  Run "npm run workbuddy:login" once in the server folder to sign BizPilot in to its WorkBuddy account.`),
+    console.log(h.online ? 'WorkBuddy engine: online' : `WorkBuddy engine: OFFLINE — ${h.error}\n  Sign it in at /admin/workbuddy on this server (or "npm run workbuddy:login" locally).`),
   );
+  // Keep the stored copy current when the runtime refreshes its token.
+  setInterval(() => void saveLogin().catch((e) => console.error(e)), 5 * 60_000);
   if (!isSupabaseConfigured()) return;
   // Tasks interrupted by a restart can't resume.
   await supabaseAdmin().from('agent_tasks').update({ status: 'failed', result: 'Interrupted because the BizPilot server restarted.' }).in('status', ['starting', 'running', 'waiting_permission']);

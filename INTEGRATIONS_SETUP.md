@@ -11,8 +11,8 @@ Values in `server/.env` act as defaults (see `server/.env.example`).
 
 ## WorkBuddy (AI engine)
 BizPilot runs on one built-in WorkBuddy account; users never sign in. The operator signs the
-server in once: `npm run workbuddy:login` (local) or sets `CODEBUDDY_AUTH_TOKEN` from
-`npm run workbuddy:token` (cloud, see DEPLOY.md).
+server in once: `npm run workbuddy:login` (local) or at `/admin/workbuddy` on the
+cloud server (see DEPLOY.md).
 If you have the WorkBuddy desktop app you can point `CODEBUDDY_CODE_PATH` at its bundled CLI.
 
 ## Shopee (orders + reviews)

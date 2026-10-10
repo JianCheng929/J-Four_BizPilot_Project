@@ -1,7 +1,10 @@
 /**
  * One-time setup for the BizPilot operator: sign the server in to the
- * WorkBuddy account that powers BizPilot. Run:  npm run workbuddy:login
- * The login is cached on this machine; BizPilot users never see it.
+ * WorkBuddy account that powers BizPilot. BizPilot users never see this.
+ * On a cloud server, use the /admin/workbuddy page instead.
+ *
+ *   npm run workbuddy:login     sign in on this machine (local server)
+ *   npm run workbuddy:logout    sign out on this machine
  */
 import 'dotenv/config';
 import { unstable_v2_authenticate, unstable_v2_logout } from '@tencent-ai/agent-sdk';
@@ -15,11 +18,12 @@ if (process.argv.includes('--logout')) {
 
 console.log('Starting WorkBuddy sign-in…');
 try {
+  const env = runtimeEnv();
   const r = await unstable_v2_authenticate({
     environment,
     timeout: 10 * 60_000,
     pathToCodebuddyCode: cliPath(),
-    env: runtimeEnv(),
+    env,
     onAuthUrl: async ({ authUrl }) => {
       console.log('\nOpen this link and sign in with the WorkBuddy account BizPilot should use:\n');
       console.log(`  ${authUrl}\n`);
@@ -31,11 +35,7 @@ try {
   const name = r.userinfo.userNickname || r.userinfo.userName || r.userinfo.userId;
   rememberAccount(name);
   console.log(`\nDone. BizPilot now runs on WorkBuddy account: ${name}`);
-  if (process.argv.includes('--print-token')) {
-    console.log('\nFor a cloud server, add this as the environment variable CODEBUDDY_AUTH_TOKEN there.');
-    console.log('Treat it like a password: never commit it or share it.\n');
-    console.log(r.userinfo.token);
-  }
+
   process.exit(0);
 } catch (e) {
   console.error(`\nSign-in failed: ${(e as Error).message}`);

@@ -8,8 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "workbuddy:login": "tsx scripts/workbuddy-login.ts",
-    "workbuddy:logout": "tsx scripts/workbuddy-login.ts --logout",
-    "workbuddy:token": "tsx scripts/workbuddy-login.ts --print-token"
+    "workbuddy:logout": "tsx scripts/workbuddy-login.ts --logout"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",

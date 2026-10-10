@@ -4,7 +4,7 @@ import { newId } from '../../../src/lib/db/defaults.ts';
 import { supabaseAdmin } from '../lib/supabase.ts';
 import { readSnapshot } from '../lib/workspace.ts';
 import { buildBizPilotServer } from './tools.ts';
-import { cliPath, environment, rememberAccount, reportRun, runtimeEnv, sandboxDir } from './workbuddy.ts';
+import { cliPath, environment, rememberAccount, reportRun, runtimeEnv, sandboxDir, withRuntime } from './workbuddy.ts';
 
 /**
  * Runs one owner goal end-to-end on the WorkBuddy agent runtime with BizPilot's
@@ -75,7 +75,7 @@ export async function startTask(businessId: string, prompt: string): Promise<Age
   if (error) throw new Error(error.message);
   const l: Live = { task, businessId, abort: new AbortController(), dirty: false };
   live.set(task.id, l);
-  void run(l);
+  void withRuntime(() => run(l));
   return task;
 }
 

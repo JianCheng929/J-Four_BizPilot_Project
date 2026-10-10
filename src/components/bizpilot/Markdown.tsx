@@ -8,13 +8,15 @@ import { cn } from '@/lib/utils';
  */
 function inline(text: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*)/g;
+  const re = /(\[[^\]]+\]\((?:https?:\/\/|mailto:)[^)\s]+\)|\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*\s][^*]*\*)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const t = m[0];
-    if (t.startsWith('**') || t.startsWith('__')) out.push(<strong key={m.index} className="font-semibold">{t.slice(2, -2)}</strong>);
+    const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(t);
+    if (link) out.push(<a key={m.index} href={link[2]} target="_blank" rel="noopener noreferrer" className="font-medium text-teal-700 underline underline-offset-2">{link[1]}</a>);
+    else if (t.startsWith('**') || t.startsWith('__')) out.push(<strong key={m.index} className="font-semibold">{t.slice(2, -2)}</strong>);
     else if (t.startsWith('`')) out.push(<code key={m.index} className="rounded bg-slate-100 px-1 text-[0.85em]">{t.slice(1, -1)}</code>);
     else out.push(<em key={m.index}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;
@@ -41,8 +43,40 @@ export function Markdown({ text, className }: { text: string; className?: string
     list = null;
   };
 
+  let table: string[][] | null = null;
+  const cells = (l: string) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+  const flushTable = () => {
+    if (!table) return;
+    const [head, ...rows] = table;
+    const num = (c: string) => /^[-+]?(RM\s?)?[-+]?[\d,]+(\.\d+)?%?$/i.test(c);
+    blocks.push(
+      <div key={blocks.length} className="overflow-x-auto rounded-lg border border-slate-200">
+        <table className="w-full border-collapse text-sm">
+          <thead className="bg-slate-50">
+            <tr>{head.map((c, i) => <th key={i} className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">{inline(c)}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="odd:bg-white even:bg-slate-50/60">
+                {head.map((_, j) => <td key={j} className={cn('border-b border-slate-100 px-3 py-2 align-top', num(r[j] ?? '') && 'text-right tabular-nums')}>{inline(r[j] ?? '')}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>,
+    );
+    table = null;
+  };
+
   for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
     const line = raw.trimEnd();
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      flushPara(); flushList();
+      if (/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line)) continue; // header separator
+      (table ??= []).push(cells(line));
+      continue;
+    }
+    flushTable();
     const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
     const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
@@ -62,5 +96,6 @@ export function Markdown({ text, className }: { text: string; className?: string
   }
   flushPara();
   flushList();
+  flushTable();
   return <div className={cn('space-y-2 break-words', className)}>{blocks}</div>;
 }

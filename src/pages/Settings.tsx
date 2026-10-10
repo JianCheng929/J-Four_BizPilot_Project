@@ -177,6 +177,9 @@ function ProfileForm() {
             </Select>
           </F>
           {txt('shipFromPostcode', 'Ship-from postcode', 'Used for courier quotes. Defaults to the postcode above.')}
+          <F label="Starting capital / modal (RM)" hint={`e.g. 1000. BizPilot manages your money from here: sales add to it, expenses and purchase orders take from it, and orders bigger than the money left are blocked.${s.openingCashDate ? ` Last set ${new Date(s.openingCashDate).toLocaleDateString()}.` : ''}`}>
+            <Input type="number" min={0} step="0.01" value={String(s.openingCash ?? 0)} onChange={(e) => setS((x) => ({ ...x, openingCash: Number(e.target.value), openingCashDate: new Date().toISOString() }))} />
+          </F>
         </CardContent>
       </Card>
 

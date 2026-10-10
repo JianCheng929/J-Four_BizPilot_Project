@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
-import { salesLastNDays, upcomingBills } from '@/lib/metrics';
+import { cashPosition, salesLastNDays, upcomingBills } from '@/lib/metrics';
 import { money } from '@/lib/format';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PageHeader } from '@/components/layout/AppShell';
@@ -35,9 +35,10 @@ export function Finance() {
       <PageHeader
         title="Finance"
         subtitle={
-          db.salesOrders.length || db.expenses.length
-            ? `Last 7 days: ${money(week.revenue)} from ${week.orders} order(s)${bills.length ? ` · ${bills.length} bill(s) due within 7 days` : ''}`
-            : 'Sales, expenses, invoices and profit'
+          `Money available: ${money(cashPosition(db).balance)}${db.settings.openingCashDate ? '' : ' (enter your starting capital in Settings)'}` +
+          (db.salesOrders.length || db.expenses.length
+            ? ` · Last 7 days: ${money(week.revenue)} from ${week.orders} order(s)${bills.length ? ` · ${bills.length} bill(s) due within 7 days` : ''}`
+            : '')
         }
       />
       <Tabs value={tab} onValueChange={setTab}>

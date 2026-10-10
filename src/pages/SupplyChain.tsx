@@ -3,7 +3,7 @@ import { AlertTriangle, ClipboardList, Factory, PackageCheck, Pencil, Plus, Send
 import { toast } from 'sonner';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
-import { latePurchaseOrders } from '@/lib/metrics';
+import { cashPosition, latePurchaseOrders } from '@/lib/metrics';
 import { fmtDate, money, relDay } from '@/lib/format';
 import type { BizPilotDB, PurchaseOrder, Supplier } from '@/lib/db/types';
 import { Button } from '@/components/ui/button';
@@ -86,7 +86,7 @@ export function SupplyChain() {
         title="Supply Chain"
         subtitle={
           db.suppliers.length
-            ? `${db.suppliers.length} supplier(s) · ${money(openSpend)} in open purchase orders`
+            ? `${db.suppliers.length} supplier(s) · ${money(openSpend)} in open purchase orders · ${money(cashPosition(db).balance)} money available`
             : 'Suppliers, purchase orders and deliveries'
         }
         actions={
@@ -201,6 +201,16 @@ export function SupplyChain() {
                           </TableCell>
                           <TableCell>
                             <StatusPill status={po.status} />
+                            {(po.status === 'ordered' || po.status === 'partially_received') && (() => {
+                              // Approving a PO places it in BizPilot; the supplier only gets it if it was emailed.
+                              const res = db.approvals.find((a) => a.type === 'purchase_order' && a.executionResult?.startsWith(`${po.poNumber} `))?.executionResult ?? '';
+                              const sent = /Emailed to/.test(res);
+                              return (
+                                <div className={cn('mt-1 text-xs', sent ? 'text-teal-700' : 'text-amber-700')}>
+                                  {sent ? 'Emailed to supplier' : /Email to supplier failed/.test(res) ? 'Email failed: contact supplier' : 'Not sent: contact supplier'}
+                                </div>
+                              );
+                            })()}
                           </TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-1">

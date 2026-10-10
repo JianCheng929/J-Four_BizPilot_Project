@@ -225,3 +225,28 @@ export function dailySalesSeries(db: BizPilotDB, days: number) {
   }
   return out;
 }
+
+export interface CashPosition {
+  capital: number;
+  capitalSet: boolean;
+  salesIn: number;
+  expensesOut: number;
+  purchasesOut: number;
+  balance: number;
+}
+
+/**
+ * Money the business has left to work with: the owner's starting capital (modal)
+ * from Settings, plus paid sales, minus paid expenses and placed purchase orders.
+ * Stock purchases count as money out when the PO is placed.
+ */
+export function cashPosition(db: BizPilotDB): CashPosition {
+  const salesIn = paidOrders(db.salesOrders).reduce((s, o) => s + o.total, 0);
+  const expensesOut = db.expenses.filter((e) => e.paid).reduce((s, e) => s + e.amount, 0);
+  const purchasesOut = db.purchaseOrders
+    .filter((p) => ['ordered', 'partially_received', 'received'].includes(p.status))
+    .reduce((s, p) => s + p.totalCost, 0);
+  const capital = Number(db.settings.openingCash) || 0;
+  const balance = Math.round((capital + salesIn - expensesOut - purchasesOut) * 100) / 100;
+  return { capital, capitalSet: Boolean(db.settings.openingCashDate), salesIn, expensesOut, purchasesOut, balance };
+}

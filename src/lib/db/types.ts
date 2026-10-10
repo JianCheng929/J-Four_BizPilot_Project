@@ -16,9 +16,15 @@ export interface BusinessSettings {
   automationLevel: 1 | 2 | 3; // blueprint §12
   autopilot: boolean; // WorkBuddy runs the daily operations by itself
   autopilotHour: number; // hour of day (business timezone) for the daily run
+  openingCash: number; // owner's starting capital (modal), RM
+  openingCashDate: string; // ISO time the owner last set openingCash; '' = never set
   brandVoice: string;
   targetAudience: string;
   prohibitedClaims: string;
+  brandDifferentiators: string; // product benefits and what makes the brand different
+  brandStyle: string; // colours, fonts, visual style
+  brandLanguages: string; // e.g. 'English, Malay'
+  brandCompetitors: string; // competitor names or links, one per line
   // Legal / tax identity (needed for LHDN MyInvois e-invoices)
   legalName: string;
   tin: string; // Tax Identification Number

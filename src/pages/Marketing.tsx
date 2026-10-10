@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { AlertTriangle, CalendarDays, Megaphone, Pencil, Plus, RotateCcw, Send, Trash2, UserRound } from 'lucide-react';
+import { toast } from 'sonner';
+import { AlertTriangle, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Clapperboard, Megaphone, Pencil, Plus, RotateCcw, Send, Sparkles, Trash2, UserRound } from 'lucide-react';
 import { useBizPilot } from '@/lib/store';
 import * as ops from '@/lib/ops';
 import { fmtDate, fmtDateTime, money } from '@/lib/format';
@@ -8,8 +9,11 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { PageHeader } from '@/components/layout/AppShell';
+import type { PageKey } from '@/components/layout/AppShell';
+import { post } from '@/lib/api';
+import { salesTotal } from '@/lib/metrics';
 import { cn } from '@/lib/utils';
-import { EmptyState, Pill, SectionCard, StatusPill, primaryBtn } from '@/components/bizpilot/common';
+import { EmptyState, Kpi, Pill, SectionCard, StatusPill, primaryBtn } from '@/components/bizpilot/common';
 import { AUTO_PUBLISH, BrandProfileDialog, CampaignDialog, ContentDialog } from '@/components/bizpilot/MarketingDialogs';
 import { hasPendingApproval } from '@/components/bizpilot/actions';
 
@@ -29,8 +33,52 @@ function dayKey(iso: string) {
   return new Date(iso).toLocaleDateString('en-CA'); // yyyy-mm-dd local
 }
 
-export function Marketing() {
+const TYPE_FILTERS = [
+  ['all', 'All drafts'],
+  ['post', 'Posts'],
+  ['carousel', 'Carousels'],
+  ['video_script', 'Video scripts'],
+  ['ad', 'Ads'],
+] as const;
+
+function startOfWeek(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); // Monday
+  return x;
+}
+
+function addDays(d: Date, n: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+export function Marketing({ onNavigate }: { onNavigate?: (p: PageKey) => void }) {
   const { db, run } = useBizPilot();
+  const [tab, setTab] = useState('calendar');
+  const [view, setView] = useState<'week' | 'month' | 'list'>('week');
+  const [anchor, setAnchor] = useState(() => new Date());
+  const [typeFilter, setTypeFilter] = useState<(typeof TYPE_FILTERS)[number][0]>('all');
+  const [asking, setAsking] = useState(false);
+
+  /** Hand a marketing job to WorkBuddy and open its chat in Command Centre. */
+  const ask = async (goal: string) => {
+    setAsking(true);
+    try {
+      await post('/api/agent/tasks', { prompt: goal });
+      toast.success('WorkBuddy is on it. Opening Command Centre…');
+      onNavigate?.('command');
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setAsking(false);
+    }
+  };
+  const nextMonday = addDays(startOfWeek(new Date()), 7).toLocaleDateString('en-CA');
+  const PLAN_WEEK = `Load the marketing-content skill and plan next week's content (Monday ${nextMonday} to Sunday). Create the drafts in the content calendar now.`;
+  const VIDEO = 'Load the marketing-content skill and write one short promotional video (script, storyboard, shot list, voice-over, subtitles, title and thumbnail ideas) for the product that most needs a push right now. Save it as a video_script draft.';
+  const INSIGHTS = 'Load the marketing-content skill and review our marketing results: what worked, what did not, and the 3 things to change next week. Separate facts from guesses.';
   const [brandOpen, setBrandOpen] = useState(false);
   const [contentDialog, setContentDialog] = useState<{ open: boolean; item: ContentItem | null }>({ open: false, item: null });
   const [campDialog, setCampDialog] = useState<{ open: boolean; campaign: Campaign | null }>({ open: false, campaign: null });
@@ -112,74 +160,24 @@ export function Marketing() {
     <div>
       <PageHeader
         title="Marketing Studio"
-        subtitle="Plan, approve and publish content; track campaign results"
+        subtitle="Brand profile, content calendar, post and video drafts, campaigns and analytics"
         actions={
-          <Button size="sm" className={primaryBtn} onClick={() => setContentDialog({ open: true, item: null })}>
-            <Plus className="mr-1 h-4 w-4" /> New content
-          </Button>
+          <>
+            <Button size="sm" variant="outline" onClick={() => setContentDialog({ open: true, item: null })}>
+              <Plus className="mr-1 h-4 w-4" /> New content
+            </Button>
+            <Button size="sm" className={primaryBtn} disabled={asking} onClick={() => void ask(PLAN_WEEK)}>
+              <Sparkles className="mr-1 h-4 w-4" /> Plan next week with WorkBuddy
+            </Button>
+          </>
         }
       />
 
-      <div className="mb-4 grid gap-4 lg:grid-cols-[1.2fr_1fr]">
-        <SectionCard
-          title="Brand profile"
-          actions={
-            <Button size="sm" variant="outline" onClick={() => setBrandOpen(true)}>
-              <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
-            </Button>
-          }
-        >
-          {brandComplete || s.prohibitedClaims ? (
-            <dl className="grid gap-2 text-sm">
-              <div>
-                <dt className="text-[11px] uppercase text-slate-400">Voice</dt>
-                <dd className="text-slate-700">{s.brandVoice || <span className="text-slate-400">Not set</span>}</dd>
-              </div>
-              <div>
-                <dt className="text-[11px] uppercase text-slate-400">Audience</dt>
-                <dd className="text-slate-700">{s.targetAudience || <span className="text-slate-400">Not set</span>}</dd>
-              </div>
-              <div>
-                <dt className="text-[11px] uppercase text-slate-400">Prohibited claims</dt>
-                <dd className="text-slate-700">{s.prohibitedClaims || <span className="text-slate-400">None</span>}</dd>
-              </div>
-            </dl>
-          ) : (
-            <div className="flex items-center gap-3 text-sm text-slate-600">
-              <UserRound className="h-5 w-5 text-slate-400" />
-              <span>Describe your brand voice and audience so drafted content sounds like you.</span>
-              <Button size="sm" className={primaryBtn} onClick={() => setBrandOpen(true)}>
-                Set up
-              </Button>
-            </div>
-          )}
-        </SectionCard>
-        <SectionCard title="Status">
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-slate-600">Content in calendar</span>
-              <span className="font-medium">{db.contentItems.length}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-slate-600">Awaiting approval</span>
-              <span className="font-medium">{db.contentItems.filter((c) => c.status === 'in_review').length}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-slate-600">Published (all time)</span>
-              <span className="font-medium">{db.contentItems.filter((c) => c.status === 'published').length}</span>
-            </div>
-            <div className={cn('flex justify-between', failed.length && 'text-red-600')}>
-              <span>Failed to publish</span>
-              <span className="font-medium">{failed.length}</span>
-            </div>
-            <div className="flex justify-between border-t pt-2">
-              <span className="text-slate-600">Ad spend / attributed revenue</span>
-              <span className="font-medium">
-                {money(totals.spend)} / {money(totals.revenue)}
-              </span>
-            </div>
-          </div>
-        </SectionCard>
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Kpi icon={CalendarDays} label="Scheduled this week" value={String(db.contentItems.filter((c) => { const t = new Date(c.scheduledDate).getTime(); const w = startOfWeek(new Date()).getTime(); return t >= w && t < w + 7 * 86400000; }).length)} />
+        <Kpi icon={Send} label="Awaiting approval" value={String(db.contentItems.filter((c) => c.status === 'in_review').length)} tone="amber" />
+        <Kpi icon={Megaphone} label="Published" value={String(db.contentItems.filter((c) => c.status === 'published').length)} hint={failed.length ? `${failed.length} failed` : undefined} tone={failed.length ? 'red' : 'teal'} />
+        <Kpi icon={BarChart3} label="Ad spend / revenue" value={`${money(totals.spend)} / ${money(totals.revenue)}`} tone="slate" />
       </div>
 
       {(failed.length > 0 || overBudget.length > 0) && (
@@ -199,14 +197,127 @@ export function Marketing() {
         </div>
       )}
 
-      <Tabs defaultValue="calendar">
-        <TabsList>
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList className="flex-wrap">
+          <TabsTrigger value="brand">Brand profile</TabsTrigger>
           <TabsTrigger value="calendar">Content calendar</TabsTrigger>
+          <TabsTrigger value="drafts">Post &amp; video drafts</TabsTrigger>
           <TabsTrigger value="campaigns">Campaigns</TabsTrigger>
+          <TabsTrigger value="analytics">Analytics</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="calendar" className="mt-4">
-          {db.contentItems.length === 0 ? (
+        <TabsContent value="brand" className="mt-4">
+          <SectionCard
+            title="Brand profile"
+            description="WorkBuddy follows this for every caption, script and ad."
+            actions={
+              <Button size="sm" variant="outline" onClick={() => setBrandOpen(true)}>
+                <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+              </Button>
+            }
+          >
+            {brandComplete || s.prohibitedClaims ? (
+              <dl className="grid gap-4 text-sm sm:grid-cols-2">
+                {([
+                  ['Voice', s.brandVoice],
+                  ['Audience and personas', s.targetAudience],
+                  ['Benefits and differentiators', s.brandDifferentiators],
+                  ['Visual style', s.brandStyle],
+                  ['Languages', s.brandLanguages],
+                  ['Competitors', s.brandCompetitors],
+                  ['Prohibited claims', s.prohibitedClaims],
+                ] as const).map(([k, v]) => (
+                  <div key={k}>
+                    <dt className="text-[11px] uppercase text-slate-400">{k}</dt>
+                    <dd className="whitespace-pre-line text-slate-700">{v || <span className="text-slate-400">Not set</span>}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <div className="flex items-center gap-3 text-sm text-slate-600">
+                <UserRound className="h-5 w-5 text-slate-400" />
+                <span>Describe your brand voice and audience so drafted content sounds like you.</span>
+                <Button size="sm" className={primaryBtn} onClick={() => setBrandOpen(true)}>
+                  Set up
+                </Button>
+              </div>
+            )}
+          </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="calendar" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {(['week', 'month', 'list'] as const).map((v) => (
+              <Button key={v} size="sm" variant={view === v ? 'default' : 'outline'} className={cn(view === v && primaryBtn)} onClick={() => setView(v)}>
+                {v === 'week' ? 'Week' : v === 'month' ? 'Month' : 'List'}
+              </Button>
+            ))}
+            {view !== 'list' && (
+              <div className="ml-auto flex items-center gap-1">
+                <Button size="icon-sm" variant="outline" onClick={() => setAnchor((a) => (view === 'week' ? addDays(a, -7) : new Date(a.getFullYear(), a.getMonth() - 1, 1)))}>
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAnchor(new Date())}>Today</Button>
+                <Button size="icon-sm" variant="outline" onClick={() => setAnchor((a) => (view === 'week' ? addDays(a, 7) : new Date(a.getFullYear(), a.getMonth() + 1, 1)))}>
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
+          </div>
+          {view !== 'list' && (() => {
+            const first = view === 'week' ? startOfWeek(anchor) : startOfWeek(new Date(anchor.getFullYear(), anchor.getMonth(), 1));
+            const weeks = view === 'week' ? 1 : 6;
+            const days = Array.from({ length: weeks * 7 }, (_, i) => addDays(first, i));
+            const today = new Date().toLocaleDateString('en-CA');
+            return (
+              <SectionCard
+                title={view === 'week'
+                  ? `Week of ${first.toLocaleDateString('en-MY', { day: 'numeric', month: 'short', year: 'numeric' })}`
+                  : anchor.toLocaleDateString('en-MY', { month: 'long', year: 'numeric' })}
+              >
+                <div className="overflow-x-auto">
+                  <div className="grid min-w-[720px] grid-cols-7 gap-px rounded-lg border border-slate-200 bg-slate-200">
+                    {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
+                      <div key={d} className="bg-slate-50 px-2 py-1 text-[11px] font-semibold uppercase text-slate-500">{d}</div>
+                    ))}
+                    {days.map((d) => {
+                      const key = d.toLocaleDateString('en-CA');
+                      const list = db.contentItems.filter((c) => dayKey(c.scheduledDate) === key);
+                      const outside = view === 'month' && d.getMonth() !== anchor.getMonth();
+                      return (
+                        <div key={key} className={cn('min-h-24 bg-white p-1.5', view === 'week' && 'min-h-40', outside && 'bg-slate-50/70')}>
+                          <div className={cn('mb-1 text-[11px]', key === today ? 'font-bold text-teal-700' : outside ? 'text-slate-300' : 'text-slate-500')}>{d.getDate()}</div>
+                          <div className="space-y-1">
+                            {list.map((c) => (
+                              <button
+                                key={c.id}
+                                type="button"
+                                title={c.title}
+                                onClick={() => setContentDialog({ open: true, item: c })}
+                                className={cn(
+                                  'block w-full truncate rounded px-1.5 py-1 text-left text-[11px]',
+                                  c.status === 'published' ? 'bg-teal-50 text-teal-800' : c.status === 'failed' ? 'bg-red-50 text-red-700' : c.status === 'in_review' ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-700',
+                                )}
+                              >
+                                {c.platform.slice(0, 2)} · {c.title}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-slate-500">
+                  <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-slate-300" />Draft</span>
+                  <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-300" />Awaiting approval</span>
+                  <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-teal-400" />Published</span>
+                  <span><span className="mr-1 inline-block h-2 w-2 rounded-sm bg-red-300" />Failed</span>
+                </div>
+              </SectionCard>
+            );
+          })()}
+          {view === 'list' && (db.contentItems.length === 0 ? (
             <EmptyState
               icon={CalendarDays}
               title="Your content calendar is empty"
@@ -304,7 +415,68 @@ export function Marketing() {
                 </div>
               )}
             </SectionCard>
-          )}
+          ))}
+        </TabsContent>
+
+        <TabsContent value="drafts" className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {TYPE_FILTERS.map(([k, label]) => (
+              <Button key={k} size="sm" variant={typeFilter === k ? 'default' : 'outline'} className={cn(typeFilter === k && primaryBtn)} onClick={() => setTypeFilter(k)}>
+                {label}
+              </Button>
+            ))}
+            <Button size="sm" variant="outline" className="ml-auto" disabled={asking} onClick={() => void ask(VIDEO)}>
+              <Clapperboard className="mr-1 h-4 w-4" /> Write a promo video with WorkBuddy
+            </Button>
+          </div>
+          {(() => {
+            const drafts = db.contentItems
+              .filter((c) => c.status !== 'published' && (typeFilter === 'all' || c.type === typeFilter))
+              .sort((a, b) => a.scheduledDate.localeCompare(b.scheduledDate));
+            if (!drafts.length) {
+              return (
+                <EmptyState
+                  icon={Clapperboard}
+                  title="No drafts here"
+                  body="WorkBuddy can plan a week of posts or write a promotional video script for you, or you can write one yourself."
+                  actionLabel="Plan next week with WorkBuddy"
+                  onAction={() => void ask(PLAN_WEEK)}
+                />
+              );
+            }
+            return (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {drafts.map((c) => {
+                  const pending = hasPendingApproval(db, 'marketing_publish', 'contentId', c.id);
+                  return (
+                    <SectionCard
+                      key={c.id}
+                      title={c.title}
+                      description={`${c.platform} · ${c.type.replace('_', ' ')} · ${fmtDateTime(c.scheduledDate)}`}
+                      actions={<StatusPill status={c.status} />}
+                    >
+                      {c.imageUrl && <img src={c.imageUrl} alt="" className="mb-2 max-h-48 w-full rounded-md border object-cover" />}
+                      <div className="max-h-64 overflow-y-auto whitespace-pre-line rounded-md bg-slate-50 p-3 text-sm text-slate-700">{c.body}</div>
+                      {c.status === 'failed' && c.error && <div className="mt-2 text-xs text-red-600">Error: {c.error}</div>}
+                      <div className="mt-3 flex flex-wrap justify-end gap-2">
+                        {pending && <span className="mr-auto self-center text-[11px] text-amber-700">awaiting approval</span>}
+                        {c.status !== 'in_review' && (
+                          <Button size="sm" variant="outline" onClick={() => setContentDialog({ open: true, item: c })}>
+                            <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+                          </Button>
+                        )}
+                        {(c.status === 'draft' || c.status === 'failed') && (
+                          <Button size="sm" className={primaryBtn} disabled={pending} onClick={() => submit(c)}>
+                            <Send className="mr-1 h-3.5 w-3.5" /> Submit for approval
+                          </Button>
+                        )}
+                      </div>
+                    </SectionCard>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </TabsContent>
 
         <TabsContent value="campaigns" className="mt-4">
@@ -406,6 +578,104 @@ export function Marketing() {
               </div>
             </SectionCard>
           )}
+        </TabsContent>
+
+        <TabsContent value="analytics" className="mt-4 space-y-4">
+          {(() => {
+            const published = db.contentItems.filter((c) => c.status === 'published').length;
+            const attempted = published + failed.length;
+            const platforms = ['Facebook', 'Instagram', 'TikTok', 'YouTube', 'LinkedIn'] as const;
+            const ranked = [...db.campaigns].filter((c) => c.spend > 0).sort((a, b) => b.revenue / b.spend - a.revenue / a.spend);
+            const weak = ranked.filter((c) => c.revenue / c.spend < 1);
+            const inWindow = (c: Campaign) => {
+              if (!c.startDate) return null;
+              const from = new Date(c.startDate).getTime();
+              const to = c.endDate ? new Date(c.endDate).getTime() + 86400000 : Date.now();
+              return salesTotal(db.salesOrders.filter((o) => { const t = new Date(o.date).getTime(); return t >= from && t < to; }));
+            };
+            return (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <Kpi icon={Send} label="Publishing success" value={attempted ? `${Math.round((published / attempted) * 100)}%` : '—'} hint={`${published} published · ${failed.length} failed`} tone={failed.length ? 'amber' : 'teal'} />
+                  <Kpi icon={BarChart3} label="Return on ad spend" value={totals.spend > 0 ? `${(totals.revenue / totals.spend).toFixed(2)}×` : '—'} hint={`${money(totals.revenue)} from ${money(totals.spend)}`} tone={totals.spend > 0 && totals.revenue < totals.spend ? 'red' : 'teal'} />
+                  <Kpi icon={Megaphone} label="Cost per conversion" value={totals.conversions ? money(totals.spend / totals.conversions) : '—'} hint={`${totals.conversions} conversion(s)`} tone="slate" />
+                  <Kpi icon={CalendarDays} label="Content planned" value={String(db.contentItems.length)} hint={`${db.contentItems.filter((c) => c.status === 'draft').length} still drafts`} tone="slate" />
+                </div>
+
+                {weak.length > 0 && (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50/60 px-4 py-3 text-sm text-amber-900">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    Losing money: {weak.map((c) => `${c.name} (ROAS ${(c.revenue / c.spend).toFixed(2)}×)`).join('; ')}. Consider pausing or changing the creative.
+                  </div>
+                )}
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <SectionCard title="Content by platform">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Platform</TableHead>
+                          <TableHead className="text-right">Planned</TableHead>
+                          <TableHead className="text-right">Published</TableHead>
+                          <TableHead className="text-right">Failed</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {platforms.map((p) => {
+                          const list = db.contentItems.filter((c) => c.platform === p);
+                          return (
+                            <TableRow key={p}>
+                              <TableCell>{p}</TableCell>
+                              <TableCell className="text-right">{list.length}</TableCell>
+                              <TableCell className="text-right">{list.filter((c) => c.status === 'published').length}</TableCell>
+                              <TableCell className="text-right">{list.filter((c) => c.status === 'failed').length}</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </SectionCard>
+
+                  <SectionCard title="Campaign ranking" description="Best return on ad spend first. Sales during a campaign are all sales in its dates, not proven to come from the ad.">
+                    {ranked.length === 0 ? (
+                      <div className="py-4 text-center text-sm text-slate-500">Enter spend and results on a campaign to rank it.</div>
+                    ) : (
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Campaign</TableHead>
+                            <TableHead className="text-right">ROAS</TableHead>
+                            <TableHead className="text-right">CPA</TableHead>
+                            <TableHead className="text-right">Sales during</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {ranked.map((c) => {
+                            const m = campaignMetrics(c);
+                            const during = inWindow(c);
+                            return (
+                              <TableRow key={c.id}>
+                                <TableCell className="font-medium">{c.name}</TableCell>
+                                <TableCell className={cn('text-right', m.roas !== null && m.roas < 1 && 'text-red-600')}>{m.roas !== null ? `${m.roas.toFixed(2)}×` : '—'}</TableCell>
+                                <TableCell className="text-right">{m.cpa !== null ? money(m.cpa) : '—'}</TableCell>
+                                <TableCell className="text-right">{during !== null ? money(during) : '—'}</TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    )}
+                  </SectionCard>
+                </div>
+
+                <div className="flex justify-end">
+                  <Button className={primaryBtn} disabled={asking} onClick={() => void ask(INSIGHTS)}>
+                    <Sparkles className="mr-1 h-4 w-4" /> Ask WorkBuddy what to change next week
+                  </Button>
+                </div>
+              </>
+            );
+          })()}
         </TabsContent>
       </Tabs>
 

@@ -86,7 +86,8 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
         }));
         const rs = m.reviewStats(db.reviews);
         return {
-          business: { name: db.settings.name, mode: db.settings.mode, currency: db.settings.currency, automationLevel: db.settings.automationLevel, approvalLimit: db.settings.approvalLimitAmount, brandVoice: db.settings.brandVoice, targetAudience: db.settings.targetAudience, prohibitedClaims: db.settings.prohibitedClaims },
+          business: { name: db.settings.name, mode: db.settings.mode, currency: db.settings.currency, automationLevel: db.settings.automationLevel, approvalLimit: db.settings.approvalLimitAmount, brandVoice: db.settings.brandVoice, targetAudience: db.settings.targetAudience, prohibitedClaims: db.settings.prohibitedClaims, differentiators: db.settings.brandDifferentiators, visualStyle: db.settings.brandStyle, languages: db.settings.brandLanguages, competitors: db.settings.brandCompetitors },
+          cash: m.cashPosition(db),
           counts: { products: db.products.length, suppliers: db.suppliers.length, orders: db.salesOrders.length, invoices: db.invoices.length },
           today: m.todaySales(db), last7Days: m.salesLastNDays(db, 7), last30Days: m.salesLastNDays(db, 30),
           awaitingFulfilment: m.awaitingFulfilment(db).length,
@@ -278,13 +279,15 @@ export function buildBizPilotServer(businessId: string, emit: Emit) {
       }))),
 
     // ------------------------------------------------------------ write: purchasing & stock
-    tool('draft_purchase_order', 'Create a draft purchase order and send it to the owner for approval. Unit cost defaults to the product cost.',
+    tool('draft_purchase_order', 'Create a draft purchase order and send it to the owner for approval. Unit cost defaults to the product cost. Fails if the business does not have the cash: then order less (fit get_business_overview cash.balance) or tell the owner.',
       { supplier: z.string(), lines: z.array(z.object({ product: z.string(), quantity: z.number().int().positive(), unitCost: z.number().nonnegative().optional() })).min(1), note: z.string().optional(), expectedDate: z.string().optional() },
       write(async ({ supplier, lines, note, expectedDate }) => {
         const req = await withBusiness(businessId, (db) => {
           const s = ops.findSupplier(db, supplier);
           if (!s) throw new ops.OpError(`No supplier matches "${supplier}". Use list_suppliers or create_supplier.`);
           const poLines = lines.map((l) => { const p = ops.requireProduct(db, l.product); return { productId: p.id, quantity: l.quantity, unitCost: l.unitCost ?? p.unitCost }; });
+          // Check the money first, so the owner is never asked to approve an order they can't pay for.
+          ops.assertCashFor(db, poLines.reduce((t, l) => t + l.quantity * l.unitCost, 0), 'this purchase order');
           const po = ops.createPurchaseOrder(db, { supplierId: s.id, lines: poLines, note, expectedDate }, ACTOR);
           emit({ kind: 'artifact', text: `Draft ${po.poNumber} for ${s.name}: RM${po.totalCost.toFixed(2)}` });
           return ops.requestApproval(db, {

@@ -316,34 +316,52 @@ export function CampaignDialog({
 
 export function BrandProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const { db, updateSettings } = useBizPilot();
-  const [voice, setVoice] = useState('');
-  const [audience, setAudience] = useState('');
-  const [prohibited, setProhibited] = useState('');
+  const pick = () => ({
+    brandVoice: db.settings.brandVoice ?? '',
+    targetAudience: db.settings.targetAudience ?? '',
+    brandDifferentiators: db.settings.brandDifferentiators ?? '',
+    brandStyle: db.settings.brandStyle ?? '',
+    brandLanguages: db.settings.brandLanguages ?? '',
+    brandCompetitors: db.settings.brandCompetitors ?? '',
+    prohibitedClaims: db.settings.prohibitedClaims ?? '',
+  });
+  const [f, setF] = useState(pick);
+  const set = (k: keyof ReturnType<typeof pick>) => (e: { target: { value: string } }) => setF((x) => ({ ...x, [k]: e.target.value }));
 
   useEffect(() => {
     if (!open) return;
-    setVoice(db.settings.brandVoice);
-    setAudience(db.settings.targetAudience);
-    setProhibited(db.settings.prohibitedClaims);
+    setF(pick());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className={dialogWide}>
         <DialogHeader>
           <DialogTitle>Brand profile</DialogTitle>
-          <DialogDescription>Used by WorkBuddy when drafting content and checked before publishing.</DialogDescription>
+          <DialogDescription>WorkBuddy follows this for every caption, script and ad, and checks the prohibited claims before anything is published.</DialogDescription>
         </DialogHeader>
-        <div className="grid gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Brand voice" hint="e.g. warm, playful, Manglish-friendly, no hard selling">
-            <Textarea rows={3} value={voice} onChange={(e) => setVoice(e.target.value)} />
+            <Textarea rows={3} value={f.brandVoice} onChange={set('brandVoice')} />
           </Field>
-          <Field label="Target audience">
-            <Textarea rows={2} value={audience} onChange={(e) => setAudience(e.target.value)} />
+          <Field label="Target audience and customer personas">
+            <Textarea rows={3} value={f.targetAudience} onChange={set('targetAudience')} />
           </Field>
-          <Field label="Prohibited claims" hint="Comma separated words or phrases, e.g. cure, 100% guaranteed, halal (if not certified)">
-            <Textarea rows={2} value={prohibited} onChange={(e) => setProhibited(e.target.value)} />
+          <Field label="Product benefits and differentiators" hint="Only true, provable points">
+            <Textarea rows={3} value={f.brandDifferentiators} onChange={set('brandDifferentiators')} />
+          </Field>
+          <Field label="Visual style" hint="Colours, fonts, photo style, logo notes">
+            <Textarea rows={3} value={f.brandStyle} onChange={set('brandStyle')} />
+          </Field>
+          <Field label="Content languages" hint="e.g. English, Malay, Chinese">
+            <Input value={f.brandLanguages} onChange={set('brandLanguages')} />
+          </Field>
+          <Field label="Competitors" hint="Names or links, one per line">
+            <Textarea rows={2} value={f.brandCompetitors} onChange={set('brandCompetitors')} />
+          </Field>
+          <Field label="Prohibited claims" hint="Comma separated, e.g. cure, 100% guaranteed, halal (if not certified)" className="sm:col-span-2">
+            <Textarea rows={2} value={f.prohibitedClaims} onChange={set('prohibitedClaims')} />
           </Field>
         </div>
         <DialogFooter>
@@ -353,7 +371,7 @@ export function BrandProfileDialog({ open, onOpenChange }: { open: boolean; onOp
           <Button
             className={primaryBtn}
             onClick={() => {
-              updateSettings({ brandVoice: voice.trim(), targetAudience: audience.trim(), prohibitedClaims: prohibited.trim() });
+              updateSettings(Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()])));
               onOpenChange(false);
             }}
           >

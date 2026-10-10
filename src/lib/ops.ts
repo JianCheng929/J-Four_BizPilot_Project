@@ -19,6 +19,7 @@ import type {
   SupportTicket,
 } from './db/types';
 import { newId } from './db/defaults';
+import { cashPosition } from './metrics';
 
 /**
  * Deterministic business operations (blueprint §15: the database and business
@@ -330,11 +331,22 @@ export function createPurchaseOrder(db: BizPilotDB, input: POInput, actor: strin
   return po;
 }
 
+/** Stock is paid for with real money: never place an order the business can't pay for. */
+export function assertCashFor(db: BizPilotDB, amount: number, what: string) {
+  const cash = cashPosition(db).balance;
+  if (amount <= cash) return;
+  throw new OpError(
+    `Not enough cash for ${what}: it costs RM${amount.toFixed(2)} but only RM${cash.toFixed(2)} is available. ` +
+    (db.settings.openingCashDate ? 'Record sales, add capital in Settings, or order less.' : 'Enter your starting capital in Settings → Business first.'),
+  );
+}
+
 /** Approved PO is placed with the supplier: stock becomes "incoming". */
 export function placePurchaseOrder(db: BizPilotDB, poId: string, actor: string): PurchaseOrder {
   const po = db.purchaseOrders.find((p) => p.id === poId);
   if (!po) throw new OpError('Purchase order not found.');
   if (!['draft', 'pending_approval', 'approved'].includes(po.status)) throw new OpError(`${po.poNumber} is already ${po.status}.`);
+  assertCashFor(db, po.totalCost, po.poNumber);
   po.status = 'ordered';
   po.sentAt = now();
   for (const l of po.lines) {

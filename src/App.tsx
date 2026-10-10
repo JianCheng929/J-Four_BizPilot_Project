@@ -28,7 +28,7 @@ function Shell() {
       {page === 'command' && <CommandCentre onNavigate={setPage} />}
       {page === 'inventory' && <Inventory />}
       {page === 'supplychain' && <SupplyChain />}
-      {page === 'marketing' && <Marketing />}
+      {page === 'marketing' && <Marketing onNavigate={setPage} />}
       {page === 'finance' && <Finance />}
       {page === 'customers' && <Customers />}
       {page === 'approvals' && <Approvals />}

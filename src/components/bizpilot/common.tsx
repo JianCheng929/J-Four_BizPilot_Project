@@ -35,7 +35,7 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <div className={cn('grid gap-1.5', className)}>
+    <div className={cn('grid min-w-0 gap-1.5', className)}>
       <Label className="text-xs text-slate-600">{label}</Label>
       {children}
       {error ? (
@@ -70,8 +70,9 @@ export function SimpleSelect({
 }) {
   return (
     <Select value={value || undefined} onValueChange={onChange}>
-      <SelectTrigger className={cn('w-full', className)} size={size}>
-        <SelectValue placeholder={placeholder ?? 'Select…'} />
+      <SelectTrigger className={cn('w-full min-w-0', className)} size={size}>
+        {/* Long names are cut with … instead of pushing the field out of its box */}
+        <span className="min-w-0 flex-1 truncate text-left"><SelectValue placeholder={placeholder ?? 'Select…'} /></span>
       </SelectTrigger>
       <SelectContent>
         {options.map((o) => (

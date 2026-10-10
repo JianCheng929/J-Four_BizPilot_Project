@@ -15,7 +15,7 @@ const MODES = [
   { key: 'hybrid' as const, label: 'Hybrid (both)', desc: 'You have both an online presence and a physical counter / café / shop.' },
 ];
 
-export function Onboarding({ onCreate }: { onCreate: (s: Partial<BusinessSettings>) => Promise<void> }) {
+export function Onboarding({ onCreate, onCancel }: { onCreate: (s: Partial<BusinessSettings>) => Promise<void>; onCancel?: () => void }) {
   const [step, setStep] = useState(0);
   const [name, setName] = useState('');
   const [mode, setMode] = useState<BusinessSettings['mode']>(defaultSettings.mode);
@@ -47,9 +47,10 @@ export function Onboarding({ onCreate }: { onCreate: (s: Partial<BusinessSetting
             <Compass className="h-5 w-5" />
           </div>
           <div>
-            <div className="text-base font-semibold tracking-tight">Welcome to BizPilot</div>
-            <div className="text-xs text-slate-500">Your AI business operations agent</div>
+            <div className="text-base font-semibold tracking-tight">{onCancel ? 'Add another business' : 'Welcome to BizPilot'}</div>
+            <div className="text-xs text-slate-500">{onCancel ? 'It gets its own products, money, team and agent. Switch any time from your profile menu.' : 'Your AI business operations agent'}</div>
           </div>
+          {onCancel && <Button variant="outline" size="sm" className="ml-4" onClick={onCancel}>Cancel</Button>}
         </div>
 
         <Card className="border-slate-200 shadow-sm">

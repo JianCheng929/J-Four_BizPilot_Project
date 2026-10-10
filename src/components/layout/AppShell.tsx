@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBizPilot } from '@/lib/store';
-import { Badge } from '@/components/ui/badge';
+import { AccountMenu, BusinessSwitcher } from './AccountMenu';
 import {
   Popover,
   PopoverContent,
@@ -110,17 +110,7 @@ export function AppShell({
         </nav>
 
         <div className={cn('border-t border-slate-200 p-4', mini && 'hidden')}>
-          <div className="rounded-lg bg-slate-50 p-3">
-            <div className="text-xs font-semibold">{db.settings.name}</div>
-            <div className="mt-1 flex items-center gap-1.5">
-              <Badge variant="secondary" className="text-[10px] capitalize">
-                {db.settings.mode}
-              </Badge>
-              <span className="text-[10px] text-slate-500">
-                {db.settings.currency} · {db.settings.country}
-              </span>
-            </div>
-          </div>
+          <BusinessSwitcher />
         </div>
       </aside>
 
@@ -202,9 +192,7 @@ export function AppShell({
                 </div>
               </PopoverContent>
             </Popover>
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-teal-700 text-xs font-semibold text-white">
-              KK
-            </div>
+            <AccountMenu onNavigate={onNavigate} />
           </div>
         </header>
 

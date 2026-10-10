@@ -28,3 +28,18 @@ test('attached files reach the agent as fenced data with their stored path', () 
   assert.match(t, /<<untrusted>>Item,Qty/);
   assert.equal(filesText([]), '');
 });
+
+test('a goal cut off by a restart carries its finished steps into the resumed run', async () => {
+  const { doneSoFar } = await import('../src/agent/runner.ts');
+  const at = new Date().toISOString();
+  const text = doneSoFar([
+    { at, kind: 'status', text: 'WorkBuddy started' },
+    { at, kind: 'tool_call', text: 'create product', data: { tool: 'create_product', input: { name: 'Franklin X-40' }, agent: 'inventory-agent' } },
+    { at, kind: 'tool_result', text: 'Created product Franklin X-40' },
+    { at, kind: 'message', text: 'Now I have market data.' },
+  ]);
+  assert.match(text, /inventory-agent: called create_product \{"name":"Franklin X-40"\}/);
+  assert.match(text, /result: Created product Franklin X-40/);
+  assert.match(text, /you said: Now I have market data\./);
+  assert.doesNotMatch(text, /WorkBuddy started/);
+});

@@ -35,6 +35,10 @@ interface Live {
   history: string;
   abort: AbortController;
   dirty: boolean;
+  /** Set when this server is shutting down: the run stops but stays open for the next server to pick up. */
+  handoff?: boolean;
+  /** Steps already done before a restart, for a resumed run. */
+  resumeNote?: string;
 }
 const live = new Map<string, Live>();
 
@@ -153,16 +157,16 @@ function toolResultText(content: unknown): string {
 }
 
 /** Earlier messages of the same chat, so WorkBuddy can follow up on what was said. */
-async function chatContext(businessId: string, conversationId: string): Promise<string> {
+async function chatContext(businessId: string, conversationId: string, skipId?: string): Promise<string> {
   const { data, error } = await supabaseAdmin()
     .from('agent_tasks')
-    .select('prompt, result, events, status')
+    .select('id, prompt, result, events, status')
     .eq('business_id', businessId)
     .eq('conversation_id', conversationId)
     .order('created_at', { ascending: false })
     .limit(10);
   if (error) throw new Error(error.message);
-  const turns = (data ?? []).reverse().map((t: any) => {
+  const turns = (data ?? []).reverse().filter((t: any) => t.id !== skipId).map((t: any) => {
     const messages = ((t.events ?? []) as AgentEvent[]).filter((e) => e.kind === 'message').map((e) => e.text);
     const answer = [t.result, ...messages.slice(-2)].filter(Boolean).join('\n').slice(0, 4000);
     return `Owner: ${String(t.prompt).slice(0, 2000)}\nYou (WorkBuddy): ${answer || `(${t.status}, no answer)`}`;
@@ -203,7 +207,12 @@ export async function startTask(businessId: string, prompt: string, conversation
 }
 
 async function run(l: Live) {
-  const timer = setInterval(() => void flush(l), 1500);
+  let beat = 0;
+  const timer = setInterval(() => {
+    // Heartbeat: a long web read still shows this run is alive, so no other server takes it over.
+    if (++beat % 10 === 0) { l.task.updatedAt = new Date().toISOString(); l.dirty = true; }
+    void flush(l);
+  }, 1500);
   const { task, businessId } = l;
   try {
     await restoreLogin().catch(() => false); // a goal sent right after a restart
@@ -218,7 +227,7 @@ async function run(l: Live) {
     }
     /** Lead's Agent tool call id -> member name, to label each member's steps. */
     const members = new Map<string, string>();
-    const text = (l.history
+    const text = (l.resumeNote ? `${l.resumeNote}\n\n---\nThe owner's goal:\n` : '') + (l.history
       ? `This continues an earlier conversation with the owner. Earlier messages, oldest first:\n\n${l.history}\n\n---\nThe owner's new message (answer this; "this", "it" or "yes" refer to the conversation above):\n${task.prompt}`
       : task.prompt) + filesText(l.attachments);
     const images = l.attachments.flatMap((a) => a.images ?? []);
@@ -316,13 +325,16 @@ async function run(l: Live) {
           break;
       }
     }
-    if (task.status === 'running' || task.status === 'starting') {
+    if (l.handoff) task.status = 'running';
+    else if (task.status === 'running' || task.status === 'starting') {
       task.status = l.abort.signal.aborted ? 'cancelled' : 'completed';
       task.result ??= l.abort.signal.aborted ? 'Cancelled.' : 'Done.';
     }
   } catch (e) {
     const msg = (e as Error).message || String(e);
-    if (l.abort.signal.aborted) {
+    if (l.handoff) {
+      task.status = 'running'; // the next server continues it
+    } else if (l.abort.signal.aborted) {
       task.status = 'cancelled';
       task.result = 'Cancelled by owner.';
     } else {
@@ -346,10 +358,119 @@ export function getLiveTask(taskId: string, businessId: string): AgentTask | nul
   return l && l.businessId === businessId ? l.task : null;
 }
 
-export function cancelTask(taskId: string, businessId: string): boolean {
+export async function cancelTask(taskId: string, businessId: string): Promise<boolean> {
   const l = live.get(taskId);
-  if (!l || l.businessId !== businessId) return false;
-  push(l, { kind: 'status', text: 'Cancelling…' });
-  l.abort.abort();
-  return true;
+  if (l && l.businessId === businessId) {
+    push(l, { kind: 'status', text: 'Cancelling…' });
+    l.abort.abort();
+    return true;
+  }
+  // Not on this server (it was cut off by a restart and is waiting to be picked up): close it so it isn't resumed.
+  const { data, error } = await supabaseAdmin()
+    .from('agent_tasks')
+    .update({ status: 'cancelled', result: 'Cancelled by owner.', updated_at: new Date().toISOString() })
+    .eq('id', taskId)
+    .eq('business_id', businessId)
+    .in('status', ['starting', 'running', 'waiting_permission'])
+    .select('id');
+  if (error) throw new Error(error.message);
+  return Boolean(data?.length);
+}
+
+/**
+ * Server shutting down (a deploy or restart): stop each run and leave it open, so the
+ * next server continues it instead of the owner's work being lost.
+ */
+export async function handOffRuns() {
+  const runs = [...live.values()];
+  for (const l of runs) {
+    l.handoff = true;
+    push(l, { kind: 'status', text: 'BizPilot\'s server is restarting. This goal continues by itself in a moment.', data: { handoff: true } });
+    l.abort.abort();
+  }
+  await Promise.all(runs.map((l) => flush(l).catch(() => undefined)));
+}
+
+/** An event's extra fields (stored as JSON). */
+const dataOf = (e: AgentEvent) => (e.data && typeof e.data === 'object' ? e.data : {}) as Record<string, any>;
+
+const MAX_RESUMES = 2;
+const STALE_MS = 90_000;
+
+/** What a cut-off run already did, so the resumed run carries on instead of starting over. */
+export function doneSoFar(events: AgentEvent[]): string {
+  const lines: string[] = [];
+  for (const e of events) {
+    if (e.kind === 'tool_call') lines.push(`- ${dataOf(e).agent ? `${dataOf(e).agent}: ` : ''}called ${String(dataOf(e).tool ?? e.text)} ${JSON.stringify(dataOf(e).input ?? {}).slice(0, 300)}`);
+    else if (e.kind === 'tool_result' || e.kind === 'error') lines.push(`  result: ${e.text.replace(/\s+/g, ' ').slice(0, 300)}`);
+    else if (e.kind === 'message') lines.push(`- you said: ${e.text.replace(/\s+/g, ' ').slice(0, 400)}`);
+    else if (e.kind === 'status' && dataOf(e).team === 'done') lines.push(`- ${e.text}`);
+  }
+  const text = lines.join('\n');
+  return text.length > 12_000 ? `…(earlier steps cut)\n${text.slice(-12_000)}` : text;
+}
+
+/**
+ * Picks up goals that a restart cut off (this server's runs heartbeat every 15 s,
+ * so an open goal nobody has touched for 90 s, or one handed off at shutdown, is orphaned).
+ * One at a time; a goal is resumed at most twice, then closed with an explanation.
+ */
+export async function resumeInterruptedTasks() {
+  if (isAnyTaskRunning()) return; // the small server runs one WorkBuddy at a time; the next check picks up the rest
+  const admin = supabaseAdmin();
+  const { data, error } = await admin
+    .from('agent_tasks')
+    .select('*')
+    .in('status', ['starting', 'running', 'waiting_permission'])
+    .gte('updated_at', new Date(Date.now() - 6 * 3600_000).toISOString())
+    .order('created_at')
+    .limit(20);
+  if (error) throw new Error(error.message);
+  for (const row of data ?? []) {
+    const id = String(row.id);
+    const businessId = String(row.business_id);
+    if (live.has(id) || isBusinessBusy(businessId)) continue;
+    const events = (row.events ?? []) as AgentEvent[];
+    const handedOff = events.findLastIndex((e) => dataOf(e).handoff) > events.findLastIndex((e) => dataOf(e).resumed);
+    if (!handedOff && Date.now() - new Date(String(row.updated_at)).getTime() < STALE_MS) continue; // still alive elsewhere
+    const resumes = events.filter((e) => dataOf(e).resumed).length;
+    const now = new Date().toISOString();
+    if (resumes >= MAX_RESUMES) {
+      await admin.from('agent_tasks').update({
+        status: 'failed', updated_at: now,
+        result: 'Stopped: the BizPilot server restarted several times during this goal. The steps above were saved; send the goal again to finish it.',
+      }).eq('id', id).in('status', ['starting', 'running', 'waiting_permission']);
+      continue;
+    }
+    // Claim it: only if no one changed it since we read it (another server, or the owner cancelling).
+    const claim = await admin.from('agent_tasks').update({ updated_at: now }).eq('id', id).eq('updated_at', row.updated_at).select('id');
+    if (claim.error || !claim.data?.length) continue;
+
+    const task: AgentTask = {
+      id, conversationId: String(row.conversation_id ?? id), prompt: String(row.prompt), mode: 'local', status: 'running',
+      workbuddyTaskId: null, workbuddyLink: null, events, result: null, createdAt: String(row.created_at), updatedAt: now,
+    };
+    // Team members cut off mid-job: close them in the team strip.
+    const open = new Map<string, string>();
+    for (const e of events) {
+      const d = dataOf(e) as { id?: string; agent?: string; team?: string };
+      if (d.team === 'started' && d.id) open.set(d.id, String(d.agent));
+      else if (d.team && d.id) open.delete(d.id);
+    }
+    const l: Live = { task, attachments: [], businessId, history: '', abort: new AbortController(), dirty: true };
+    for (const [mid, agent] of open) push(l, { kind: 'status', text: `${labelOf(agent)} was cut off by the restart`, data: { id: mid, agent, team: 'failed' } });
+    push(l, { kind: 'status', text: 'Continuing where BizPilot stopped (the server restarted)…', data: { resumed: true } });
+    const fileEvent = events.find((e) => Array.isArray(dataOf(e).attachments));
+    const files = (fileEvent ? dataOf(fileEvent).attachments : undefined) as { name: string; path?: string }[] | undefined;
+    l.history = row.conversation_id && row.conversation_id !== id ? await chatContext(businessId, String(row.conversation_id), id).catch(() => '') : '';
+    l.resumeNote = [
+      'IMPORTANT: you already started this goal, but BizPilot\'s server restarted and cut you off. Continue from where you stopped.',
+      'Do NOT redo steps listed below (records they created already exist; check with read tools if unsure) and do not create duplicates.',
+      files?.length ? `The owner had attached: ${files.map((f) => `"${f.name}"${f.path ? ` (stored as ${f.path})` : ''}`).join(', ')}. Their contents are no longer available; rely on what the steps below already recorded.` : '',
+      `Steps already done:\n${doneSoFar(events) || '(none yet)'}`,
+    ].filter(Boolean).join('\n');
+    live.set(id, l);
+    void withRuntime(() => run(l));
+    return;
+  }
 }

@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { isSupabaseConfigured, supabaseAdmin } from './lib/supabase.ts';
+import { isSupabaseConfigured } from './lib/supabase.ts';
 import { publishDueContent } from './lib/execute.ts';
 import { startBilling } from './lib/billing.ts';
 import { checkEngine, restoreLogin, saveLogin } from './agent/workbuddy.ts';
@@ -17,6 +17,7 @@ import { admin } from './routes/admin.ts';
 import { media } from './routes/media.ts';
 import { backups } from './routes/backups.ts';
 import { startBackups } from './lib/backup.ts';
+import { handOffRuns, resumeInterruptedTasks } from './agent/runner.ts';
 import { startAutopilot } from './lib/autopilot.ts';
 import { startReactor } from './lib/reactor.ts';
 import { rateLimit } from './lib/ratelimit.ts';
@@ -62,7 +63,7 @@ if (!isSupabaseConfigured()) {
   console.error('\n  Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in server/.env — see SUPABASE_SETUP.md\n');
 }
 
-app.listen(PORT, async () => {
+const httpServer = app.listen(PORT, async () => {
   console.log(`BizPilot server on http://localhost:${PORT}`);
   // Cloud disks are wiped on restart: put the saved WorkBuddy login back before first use.
   await restoreLogin().catch((e) => console.error(e));
@@ -79,11 +80,26 @@ app.listen(PORT, async () => {
   // Keep the stored copy current when the runtime refreshes its token.
   setInterval(() => void saveLogin().catch((e) => console.error(e)), 5 * 60_000);
   if (!isSupabaseConfigured()) return;
-  // Tasks interrupted by a restart can't resume.
-  await supabaseAdmin().from('agent_tasks').update({ status: 'failed', result: 'Interrupted because the BizPilot server restarted.' }).in('status', ['starting', 'running', 'waiting_permission']);
+  // Goals cut off by a restart or deploy continue by themselves (checked now and every 30 s).
+  const resume = () => void resumeInterruptedTasks().catch((e) => console.error('resume', e));
+  setTimeout(resume, 5_000);
+  setInterval(resume, 30_000);
   setInterval(() => void publishDueContent().catch((e) => console.error(e)), 60_000);
   startAutopilot();
   startBilling();
   startReactor();
   startBackups();
 });
+
+// Render stops the old server on each deploy: hand running goals to the new one, then exit.
+let stopping = false;
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(sig, () => {
+    if (stopping) return;
+    stopping = true;
+    httpServer.close();
+    const done = () => process.exit(0);
+    setTimeout(done, 8_000).unref();
+    void handOffRuns().catch((e) => console.error(e)).finally(done);
+  });
+}

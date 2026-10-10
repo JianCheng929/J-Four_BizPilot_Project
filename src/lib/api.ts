@@ -1,4 +1,5 @@
 import { getSupabase } from './db/supabase';
+import { getCurrentBusinessId } from './currentBusiness';
 
 /**
  * Client for the BizPilot server (server/). The server holds integration
@@ -21,7 +22,8 @@ export async function authHeader(): Promise<Record<string, string>> {
   const supa = getSupabase();
   const { data } = (await supa?.auth.getSession()) ?? { data: { session: null } };
   const token = data.session?.access_token;
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const business = getCurrentBusinessId();
+  return token ? { Authorization: `Bearer ${token}`, ...(business ? { 'X-Business-Id': business } : {}) } : {};
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -37,7 +39,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     });
   } catch {
     throw new ApiError(
-      `Can't reach the BizPilot server at ${API_BASE}. Start it with "cd server && npm start".`,
+      `Can't reach the BizPilot server at ${API_BASE}. If it was asleep, wait a moment and try again; otherwise check the server is running and allows this site (APP_URL).`,
       0,
     );
   }

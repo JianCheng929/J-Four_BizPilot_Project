@@ -63,7 +63,7 @@ agent.get('/tasks/:id', requireUser, handle(async (req) => {
 }));
 
 agent.post('/tasks/:id/cancel', requireUser, requireRole('staff'), handle(async (req) => {
-  if (!cancelTask(String(req.params.id), ctx(req).business.id)) throw new HttpError(400, 'That task is not running.');
+  if (!(await cancelTask(String(req.params.id), ctx(req).business.id))) throw new HttpError(400, 'That task is not running.');
   return { ok: true };
 }));
 

@@ -433,8 +433,19 @@ function PosTokens() {
 // ---------------------------------------------------------------- page
 
 export function Settings() {
-  const { session, signOut } = useBizPilot();
-  const [tab, setTab] = useState(() => (new URLSearchParams(window.location.search).get('integration') ? 'integrations' : 'workbuddy'));
+  const { session, signOut, db } = useBizPilot();
+  const retail = db.settings.mode === 'retail' || db.settings.mode === 'hybrid';
+  const [tab, setTab] = useState(() => {
+    if (new URLSearchParams(window.location.search).get('integration')) return 'integrations';
+    // Opened from the profile menu (e.g. "Two-step login")
+    try { const t = sessionStorage.getItem('bp.settingsTab'); sessionStorage.removeItem('bp.settingsTab'); if (t) return t; } catch { /* optional */ }
+    return 'workbuddy';
+  });
+  useEffect(() => {
+    const open = (e: Event) => setTab((e as CustomEvent<string>).detail);
+    window.addEventListener('bp:settings-tab', open);
+    return () => window.removeEventListener('bp:settings-tab', open);
+  }, []);
 
   // Return from an OAuth connect (Shopee / Lazada / TikTok Shop)
   useEffect(() => {
@@ -462,13 +473,14 @@ export function Settings() {
           <TabsTrigger value="workbuddy">AI engine</TabsTrigger>
           <TabsTrigger value="profile">Business profile</TabsTrigger>
           <TabsTrigger value="integrations">Integrations</TabsTrigger>
-          <TabsTrigger value="pos">POS</TabsTrigger>
+          {/* Shop tills only exist in Retail mode */}
+          {retail && <TabsTrigger value="pos">POS</TabsTrigger>}
           <TabsTrigger value="team">Team &amp; data</TabsTrigger>
         </TabsList>
         <TabsContent value="workbuddy"><WorkBuddyCard /></TabsContent>
         <TabsContent value="profile"><ProfileForm /></TabsContent>
         <TabsContent value="integrations"><Integrations /></TabsContent>
-        <TabsContent value="pos"><PosTokens /></TabsContent>
+        {retail && <TabsContent value="pos"><PosTokens /></TabsContent>}
         <TabsContent value="team" className="space-y-4"><TeamCard /><TwoStepCard /><BackupsCard /><DataExportCard /></TabsContent>
       </Tabs>
     </div>

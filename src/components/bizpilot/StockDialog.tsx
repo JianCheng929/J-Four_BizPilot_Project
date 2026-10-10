@@ -111,6 +111,9 @@ export function StockDialog({
               placeholder="Choose product"
               options={db.products.map((p) => ({ value: p.id, label: mode === 'count' && blind ? `${p.name} (${p.sku})` : `${p.name} (${p.sku}) · ${p.stock} on hand${p.unavailable ? `, ${p.unavailable} held` : ''}` }))}
             />
+            {product && !(mode === 'count' && blind) && (
+              <div className="text-xs text-slate-500">{product.stock} on hand{product.unavailable ? ` · ${product.unavailable} held` : ''}{product.reserved ? ` · ${product.reserved} reserved for orders` : ''}</div>
+            )}
           </Field>
           {mode === 'count' && (
             <label className="flex items-center gap-2 text-xs text-slate-600">

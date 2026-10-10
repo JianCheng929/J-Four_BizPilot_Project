@@ -48,7 +48,7 @@ create table if not exists businesses (
   settings jsonb not null default '{}'::jsonb,
   created_at timestamptz default now()
 );
-create unique index if not exists businesses_owner_idx on businesses (owner_id);
+create index if not exists businesses_owner_lookup on businesses (owner_id); -- one owner can have several businesses
 
 -- helper: is the signed-in user the owner of this business?
 create or replace function is_business_owner(bid uuid) returns boolean

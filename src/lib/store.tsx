@@ -241,23 +241,25 @@ export function useBizPilot(): Store {
 
 // ------------------------------------------------------------------ bootstrapping
 
-/** The business this user owns, or the one they were invited to as a team member. */
-export async function fetchBusiness(userId: string): Promise<BusinessRow | null> {
+/** Every business this user owns or was invited to (accepting pending invites first), owned ones first. */
+export async function listBusinesses(userId: string): Promise<BusinessRow[]> {
   const supa = getSupabase()!;
-  const { data, error } = await supa.from('businesses').select('*').eq('owner_id', userId).maybeSingle();
+  const { data, error } = await supa.from('businesses').select('*').eq('owner_id', userId).order('created_at');
   if (error) throw new Error(error.message.includes('does not exist')
     ? 'The database tables are missing. Run supabase/schema.sql in the Supabase SQL Editor (see SUPABASE_SETUP.md).'
     : error.message);
-  if (data) return { ...(data as BusinessRow), role: 'owner' };
+  const owned = (data ?? []).map((b) => ({ ...(b as BusinessRow), role: 'owner' as TeamRole }));
 
-  // Team member: link a pending invite for this email, then load that business.
+  // Team member: link pending invites for this email, then load those businesses.
   const accepted = await supa.rpc('accept_business_invite');
-  if (accepted.error) return null; // team roles not installed yet (supabase/industrial.sql)
-  const { data: m } = await supa.from('business_members').select('business_id, role').eq('user_id', userId).maybeSingle();
-  if (!m) return null;
-  const { data: b, error: bErr } = await supa.from('businesses').select('*').eq('id', m.business_id).maybeSingle();
+  if (accepted.error) return owned; // team roles not installed yet (supabase/industrial.sql)
+  const { data: ms } = await supa.from('business_members').select('business_id, role').eq('user_id', userId);
+  const ids = (ms ?? []).map((m) => m.business_id as string).filter((id) => !owned.some((b) => b.id === id));
+  if (!ids.length) return owned;
+  const { data: bs, error: bErr } = await supa.from('businesses').select('*').in('id', ids).order('created_at');
   if (bErr) throw new Error(bErr.message);
-  return b ? { ...(b as BusinessRow), role: m.role as TeamRole } : null;
+  const role = (id: string) => (ms ?? []).find((m) => m.business_id === id)?.role as TeamRole;
+  return [...owned, ...(bs ?? []).map((b) => ({ ...(b as BusinessRow), role: role((b as BusinessRow).id) }))];
 }
 
 export async function createBusiness(userId: string, settings: Partial<BusinessSettings>): Promise<BusinessRow> {
@@ -269,8 +271,10 @@ export async function createBusiness(userId: string, settings: Partial<BusinessS
     .insert({ owner_id: userId, name, mode, settings: rest })
     .select('*')
     .single();
-  if (error) throw new Error(error.message);
-  return data as BusinessRow;
+  if (error) throw new Error(/duplicate key|businesses_owner/.test(error.message)
+    ? 'Your database allows only one business per login. Run supabase/industrial.sql again in the Supabase SQL Editor, then try again.'
+    : error.message);
+  return { ...(data as BusinessRow), role: 'owner' };
 }
 
 export async function loadBusinessDb(business: BusinessRow): Promise<BizPilotDB> {

@@ -16,6 +16,7 @@
 --   7. Quotations, payment reminders and repeating invoices.
 --   8. Product variants and batch / expiry tracking.
 --   9. Warehouse bins, pick and pack, staff tasks; receipts and branch costs; PDPA consent records and backups.
+--  10. One login can own or join several businesses and switch between them; profile photos.
 -- ============================================================
 
 -- 0. Locations, transfers and stock counts (blueprint §3, A5, B4, B5) ------------------
@@ -201,6 +202,16 @@ create policy "receipts delete" on storage.objects for delete to authenticated
 insert into storage.buckets (id, name, public, file_size_limit)
 values ('backups', 'backups', false, 52428800)
 on conflict (id) do nothing;
+-- Profile photos: public pictures, each person writes only their own folder (folder = their user id).
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('avatars', 'avatars', true, 1048576)
+on conflict (id) do nothing;
+drop policy if exists "avatars upload" on storage.objects;
+create policy "avatars upload" on storage.objects for insert to authenticated
+  with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists "avatars delete" on storage.objects;
+create policy "avatars delete" on storage.objects for delete to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- 1. Team members ------------------------------------------------------------------
 create table if not exists business_members (
@@ -214,7 +225,12 @@ create table if not exists business_members (
   accepted_at timestamptz,
   unique (business_id, email)
 );
-create unique index if not exists business_members_user_idx on business_members (user_id) where user_id is not null;
+-- One login can own several businesses and be a member of several others (business switcher).
+drop index if exists business_members_user_idx;
+create unique index if not exists business_members_user_biz_idx on business_members (business_id, user_id) where user_id is not null;
+create index if not exists business_members_user_lookup on business_members (user_id);
+drop index if exists businesses_owner_idx;
+create index if not exists businesses_owner_lookup on businesses (owner_id);
 
 -- Two-step login (blueprint §17): a user who turned it on must have entered their
 -- code in this session (token level aal2) before any business data is readable or writable.
@@ -255,18 +271,16 @@ create or replace function accept_business_invite() returns uuid
 language plpgsql security definer set search_path = public as $$
 declare
   bid uuid;
-  mid uuid;
 begin
   if auth.uid() is null then return null; end if;
-  select business_id into bid from business_members where user_id = auth.uid();
-  if bid is not null then return bid; end if;
-  if exists (select 1 from businesses where owner_id = auth.uid()) then return null; end if;
-  if not exists (select 1 from auth.users where id = auth.uid() and email_confirmed_at is not null) then return null; end if;
-  select id, business_id into mid, bid from business_members
-   where user_id is null and lower(email) = lower(auth.jwt() ->> 'email')
-   order by invited_at limit 1;
-  if mid is null then return null; end if;
-  update business_members set user_id = auth.uid(), accepted_at = now() where id = mid;
+  -- Accept every pending invite for this (confirmed) email; a user can belong to several businesses.
+  if exists (select 1 from auth.users where id = auth.uid() and email_confirmed_at is not null) then
+    update business_members m set user_id = auth.uid(), accepted_at = now()
+     where m.user_id is null and lower(m.email) = lower(auth.jwt() ->> 'email')
+       and not exists (select 1 from business_members x where x.business_id = m.business_id and x.user_id = auth.uid())
+       and not exists (select 1 from businesses b where b.id = m.business_id and b.owner_id = auth.uid());
+  end if;
+  select business_id into bid from business_members where user_id = auth.uid() order by accepted_at desc nulls last limit 1;
   return bid;
 end $$;
 

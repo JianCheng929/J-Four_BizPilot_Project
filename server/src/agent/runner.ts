@@ -5,7 +5,7 @@ import { supabaseAdmin } from '../lib/supabase.ts';
 import { readSnapshot } from '../lib/workspace.ts';
 import { buildBizPilotServer } from './tools.ts';
 import { skillsIndex } from './skills.ts';
-import { cliPath, environment, rememberAccount, reportRun, runtimeEnv, sandboxDir, withRuntime } from './workbuddy.ts';
+import { cliPath, environment, rememberAccount, reportRun, restoreLogin, runtimeEnv, sandboxDir, withRuntime } from './workbuddy.ts';
 
 /**
  * Runs one owner goal end-to-end on the WorkBuddy agent runtime with BizPilot's
@@ -128,6 +128,7 @@ async function run(l: Live) {
   const timer = setInterval(() => void flush(l), 1500);
   const { task, businessId } = l;
   try {
+    await restoreLogin().catch(() => false); // a goal sent right after a restart
     const db = await readSnapshot(businessId);
     const s = db.settings;
     const { server, toolNames } = buildBizPilotServer(businessId, (e) => push(l, e));

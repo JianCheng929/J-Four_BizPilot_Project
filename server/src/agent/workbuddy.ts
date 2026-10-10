@@ -83,8 +83,15 @@ function readLoginFiles(): Record<string, string> {
   return files;
 }
 
+let restoring: Promise<boolean> | null = null;
+
 /** Put the saved login back on disk. Call before the runtime is first used. */
-export async function restoreLogin() {
+export function restoreLogin() {
+  restoring ??= restoreLoginNow().catch((e) => { restoring = null; throw e; });
+  return restoring;
+}
+
+async function restoreLoginNow() {
   if (!isSupabaseConfigured()) return false;
   const { data, error } = await supabaseAdmin().from('server_secrets').select('value').eq('key', LOGIN_KEY).maybeSingle();
   if (error) {
@@ -151,10 +158,9 @@ export function runtimeEnv(): Record<string, string> {
   for (const [k, v] of Object.entries(process.env)) env[k] = v !== undefined && keep.test(k) ? v : '';
   // A bare access token has no user id or refresh token (it gave 401) and would override the real login.
   env.CODEBUDDY_AUTH_TOKEN = '';
-  // Each runtime is a large Node process. These are the low-memory flags WorkBuddy's own
-  // codebuddy-lowmem launcher uses (about 40% less memory, same speed), plus a heap cap
-  // so it fits next to the server on a 512 MB machine.
-  env.NODE_OPTIONS = process.env.WORKBUDDY_NODE_OPTIONS || '--optimize-for-size --max-semi-space-size=2 --max-old-space-size=320';
+  // Each runtime is a large Node process: keep it small enough to fit next to the server on a
+  // 512 MB machine. Only flags Node accepts in NODE_OPTIONS work here (not --optimize-for-size).
+  env.NODE_OPTIONS = process.env.WORKBUDDY_NODE_OPTIONS || '--max-semi-space-size=2 --max-old-space-size=320';
   return env;
 }
 
@@ -219,7 +225,10 @@ export function reportRun(ok: boolean, error?: string) {
 export async function checkEngine(force = false): Promise<Health> {
   // Real runs keep `health` current (reportRun), so a check is rarely needed. Each check
   // starts a whole runtime, which would slow down a goal sent at the same moment.
-  if (!force && health && Date.now() - health.checkedAt < 6 * 60 * 60_000) return health;
+  // A failed check is retried after a minute, so a passing glitch never sticks.
+  if (!force && health && Date.now() - health.checkedAt < (health.online ? 6 * 60 * 60_000 : 60_000)) return health;
+  // Never check before the saved login is back on disk (just after a restart).
+  await restoreLogin().catch(() => false);
   if (checking) return checking;
   // Something is already using the runtime: don't start another just to check.
   if (busy > 0) return health ?? { online: true, checkedAt: Date.now(), error: null };
@@ -255,6 +264,7 @@ export async function checkEngine(force = false): Promise<Health> {
 export async function status() {
   // Before the first check, answer from the saved login instead of starting a runtime:
   // opening a page must never compete with the owner's first goal for CPU.
+  await restoreLogin().catch(() => false);
   const h = health ?? (Object.keys(readLoginFiles()).length
     ? { online: true, checkedAt: 0, error: null }
     : await checkEngine());

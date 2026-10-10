@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ListChecks,
-  Loader2, MessageSquare, Plus, Send, Sparkles, Square, Trash2, Wrench,
+  Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Send, Sparkles, Square, Trash2, Wrench,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useBizPilot } from '@/lib/store';
@@ -76,7 +76,7 @@ function EventRow({ e }: { e: AgentEvent }) {
           <div className={cn(e.kind === 'error' ? 'text-red-700' : e.kind === 'artifact' ? 'font-medium text-teal-800' : 'text-slate-500')}>{e.text}</div>
         )}
         {open && (
-          <pre className="mt-1 max-h-72 overflow-auto rounded-md bg-slate-50 p-2 text-[11px] text-slate-700">
+          <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md bg-slate-50 p-2 text-[11px] text-slate-700">
             {e.kind === 'tool_call' ? JSON.stringify(input ?? {}, null, 2) : prettyJson(e.text)}
           </pre>
         )}
@@ -122,7 +122,7 @@ function Turn({ task, onStop, pending, onNavigate }: { task: AgentTask; onStop: 
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-teal-700 px-4 py-2.5 text-sm text-white">{task.prompt}</div>
+        <div className="max-w-[85%] whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-sm bg-teal-700 px-4 py-2.5 text-sm text-white">{task.prompt}</div>
       </div>
       <div className="flex gap-3">
         <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-teal-50 text-teal-700"><Bot className="h-4 w-4" /></div>
@@ -176,6 +176,7 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
   const [turns, setTurns] = useState<AgentTask[]>([]);
   const [loadingChat, setLoadingChat] = useState(false);
   const [sending, setSending] = useState(false);
+  const [showChats, setShowChats] = useState(true);
   const [engine, setEngine] = useState<{ connected: boolean } | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const pending = db.approvals.filter((a) => a.status === 'pending').length;
@@ -279,12 +280,17 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
-        <Card className="h-fit lg:sticky lg:top-4">
+      <div className={cn('grid gap-4', showChats ? 'lg:grid-cols-[260px_minmax(0,1fr)]' : 'lg:grid-cols-[minmax(0,1fr)]')}>
+        <Card className={cn('h-fit min-w-0 lg:sticky lg:top-4', !showChats && 'hidden')}>
           <CardHeader className="pb-2">
-            <Button className="w-full bg-teal-700 text-white hover:bg-teal-800" disabled={!!active} onClick={() => { void openChat(null); setPrompt(''); }}>
-              <Plus className="mr-1.5 h-4 w-4" /> New chat
-            </Button>
+            <div className="flex gap-1">
+              <Button className="flex-1 bg-teal-700 text-white hover:bg-teal-800" disabled={!!active} onClick={() => { void openChat(null); setPrompt(''); }}>
+                <Plus className="mr-1.5 h-4 w-4" /> New chat
+              </Button>
+              <Button variant="outline" size="icon" title="Hide chats" onClick={() => setShowChats(false)}>
+                <PanelLeftClose className="h-4 w-4" />
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="max-h-[60vh] space-y-1 overflow-y-auto">
             {chats.length === 0 && <p className="px-2 text-xs text-slate-500">No chats yet.</p>}
@@ -302,8 +308,18 @@ export function CommandCentre({ onNavigate }: { onNavigate?: (p: PageKey) => voi
           </CardContent>
         </Card>
 
-        <Card className="flex min-h-[70vh] flex-col">
-          <CardContent className="flex-1 space-y-6 overflow-y-auto pt-5">
+        <Card className="flex min-h-[70vh] min-w-0 flex-col">
+          {!showChats && (
+            <div className="flex items-center gap-2 border-b border-slate-100 px-4 pb-3">
+              <Button variant="outline" size="sm" onClick={() => setShowChats(true)}>
+                <PanelLeftOpen className="mr-1 h-4 w-4" /> Chats
+              </Button>
+              <Button variant="ghost" size="sm" disabled={!!active} onClick={() => { void openChat(null); setPrompt(''); }}>
+                <Plus className="mr-1 h-4 w-4" /> New chat
+              </Button>
+            </div>
+          )}
+          <CardContent className="min-w-0 flex-1 space-y-6 overflow-y-auto pt-5">
             {loadingChat ? (
               <div className="flex justify-center py-10 text-slate-400"><Loader2 className="h-5 w-5 animate-spin" /></div>
             ) : turns.length === 0 ? (

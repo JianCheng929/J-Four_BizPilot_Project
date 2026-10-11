@@ -2,7 +2,7 @@ import { supabaseAdmin } from './supabase.ts';
 import { settingsFromBusiness, type BusinessRow } from '../../../src/lib/db/remote.ts';
 import { detectSignals, signalChatId, type Signal } from '../../../src/lib/signals.ts';
 import { readSnapshot } from './workspace.ts';
-import { isAnyTaskRunning, startTask } from '../agent/runner.ts';
+import { hasRoomForBackground, startTask } from '../agent/runner.ts';
 import { checkEngine } from '../agent/workbuddy.ts';
 
 /**
@@ -42,7 +42,7 @@ async function alreadyHandled(businessId: string, conversationId: string) {
 }
 
 async function tick() {
-  if (isAnyTaskRunning()) return; // leave room for the owner's own goals
+  if (!hasRoomForBackground()) return; // leave room for the owner's own goals
   const { data, error } = await supabaseAdmin().from('businesses').select('*');
   if (error) throw new Error(error.message);
   for (const row of (data ?? []) as BusinessRow[]) {

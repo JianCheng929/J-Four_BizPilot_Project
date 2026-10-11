@@ -177,8 +177,11 @@ async function chatContext(businessId: string, conversationId: string, skipId?: 
   return turns.join('\n\n').slice(-16000);
 }
 
-/** Any goal running on this server (the small Render plan runs one WorkBuddy at a time). */
-export const isAnyTaskRunning = () => live.size > 0;
+/** No room for another run on this server (WORKBUDDY_MAX_RUNS, default 1). */
+export const isAnyTaskRunning = () => live.size >= Math.max(1, Number(process.env.WORKBUDDY_MAX_RUNS) || 1);
+
+/** Room for a goal BizPilot starts by itself: on a bigger server one place stays free for the owner. */
+export const hasRoomForBackground = () => live.size < Math.max(1, (Number(process.env.WORKBUDDY_MAX_RUNS) || 1) - 1);
 
 export function isBusinessBusy(businessId: string) {
   for (const l of live.values()) if (l.businessId === businessId) return true;
@@ -193,6 +196,7 @@ const isBackground = (conversationId?: string | null) => /^(auto|autopilot)-/.te
  * check continues them once the server is free) instead of making the owner wait.
  */
 function pauseBackgroundRuns() {
+  if ([...live.values()].filter((x) => !x.handoff).length < maxRuns()) return; // room for both
   for (const l of live.values()) {
     if (!isBackground(l.task.conversationId) || l.handoff) continue;
     l.handoff = true;
@@ -228,16 +232,27 @@ export async function startTask(businessId: string, prompt: string, conversation
 }
 
 /**
- * One WorkBuddy at a time on the whole server (each run is a ~250 MB process and Render's
- * plan has 512 MB): goals from other businesses or people wait in line instead of crashing it.
+ * How many WorkBuddy runs at once on this server (each run is a ~250 MB process). Render's
+ * free plan has 512 MB, so the default is 1; a bigger machine sets WORKBUDDY_MAX_RUNS.
+ * Goals beyond that wait in line instead of crashing the server.
  */
-let line: Promise<void> = Promise.resolve();
+const maxRuns = () => Math.max(1, Number(process.env.WORKBUDDY_MAX_RUNS) || 1);
+let running = 0;
+const waiting: Live[] = [];
 function enqueue(l: Live) {
-  if ([...live.values()].filter((x) => !x.handoff).length > 1) {
+  if (running >= maxRuns()) {
     push(l, { kind: 'status', text: 'Waiting for BizPilot to finish another goal first…' });
     void flush(l);
   }
-  line = line.then(() => withRuntime(() => run(l))).catch((e) => console.error('agent run', e));
+  waiting.push(l);
+  next();
+}
+function next() {
+  while (running < maxRuns() && waiting.length) {
+    const l = waiting.shift()!;
+    running++;
+    void withRuntime(() => run(l)).catch((e) => console.error('agent run', e)).finally(() => { running--; next(); });
+  }
 }
 
 async function run(l: Live) {

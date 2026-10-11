@@ -14,15 +14,19 @@ searches and 3–6 page fetches in total), and don't explain your reasoning betw
 
 ## Running it with the agent team (when you lead the team)
 
-Split the launch across the team and run independent parts at the same time:
-1. Wave 1, in parallel: `research-agent` does steps 1–2 (suppliers saved with
-   `create_supplier`, market prices) and the courier rates of step 6; you do step 0.
-2. Wave 2: `inventory-agent` does steps 3–5 with the research report in its brief
-   (pricing, products with listing copy, first-stock PO for approval).
-3. Wave 3, in parallel: `marketing-agent` does step 8 (launch post with an image) and
-   `finance-agent` does step 7 (break-even and cash check), each given the SKUs, prices
-   and costs from wave 2.
-4. `qa-agent` checks everything against this list of deliverables; fix what it reports.
+Split the launch across the team so as much as possible runs at the same time
+(every extra wave costs minutes on BizPilot's small server):
+1. You do step 0 yourself first (one parallel batch of reads, a few seconds).
+2. Wave 1, in ONE message, two Agent calls in parallel:
+   - `inventory-agent` does steps 1–6: its own quick supplier and price research
+     (it has web search; no separate research-agent for a launch), pricing, products
+     with listing copy, the first-stock PO for approval, and courier rates.
+   - `marketing-agent` does step 8 at the same time: the product image and the launch
+     post draft, written WITHOUT a price (the price is still being worked out).
+3. Wave 2: `finance-agent` does step 7 (break-even and cash check) with the SKUs, prices
+   and costs from wave 1. Meanwhile you add the price to the launch post with
+   `update_content` if it should show one.
+4. `qa-agent` checks everything against this list of deliverables; fix what it reports once.
 5. You do steps 9–10.
 
 ## 0. Context (one parallel batch)

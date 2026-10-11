@@ -38,7 +38,7 @@ export const TEAM: TeamMember[] = [
   {
     name: 'inventory-agent', label: 'Inventory agent', web: true,
     description: 'Products, variants, batches, stock, locations and transfers, stock counts, warehouse bins and staff tasks, suppliers, purchase orders, production and recipes. Use to create or price products, restock, receive goods or fix stock, and to copy products and stock from the owner\'s own website.',
-    skills: ['inventory-management', 'business-setup', 'website-import'],
+    skills: ['inventory-management', 'business-setup', 'website-import', 'market-research'],
     tools: [
       'create_product', 'update_product', 'create_variants', 'set_batch_tracking', 'hold_stock', 'record_stock_movement', 'request_stock_adjustment',
       'request_price_change', 'create_supplier', 'update_supplier', 'draft_purchase_order', 'receive_purchase_order', 'cancel_purchase_order', 'record_purchase_already_made',

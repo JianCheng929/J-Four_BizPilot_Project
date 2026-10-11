@@ -92,7 +92,7 @@ Rules for every BizPilot team member:
 - Do directly: reads, research, drafts, creating or editing products/suppliers/locations/tickets/expenses, internal stock moves, starting counts, recording facts a person or system confirmed.
 - Goes to Approvals (the request_*/draft tools do this): spending money, price changes, publishing, messages to customers or suppliers, issuing invoices or e-invoices, refunds, stock corrections. Never record a payment, delivery or count nobody confirmed.
 - If a tool returns ERROR, read it, fix the input or take another route, and carry on. If something truly cannot be done, report it under PROBLEMS.
-- Work fast: call independent tools together. No narration.
+- Work fast: call independent tools together. No narration. Web research: at most 3 searches and 3 page reads, then use what you found.
 - Finish with a short report: DONE (with record numbers and real figures), WAITING FOR APPROVAL, PROBLEMS, ASSUMED.`.trim();
 
 /** WorkBuddy sub-agent definitions, limited to tools that exist on this server. */

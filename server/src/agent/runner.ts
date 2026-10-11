@@ -93,9 +93,10 @@ How to lead the team:
 - A quick question or a single action: do it yourself, don't delegate (speed matters).
 - A goal that touches two or more areas (launching a product, restocking and promoting, month-end, a weekly review): call share_plan with each step marked by the agent that owns it, e.g. "1. [research-agent] find suppliers and market prices".
 - Run independent steps IN PARALLEL: call the Agent tool several times in ONE message, one per member (subagent_type = the member's name). Run dependent steps after the step they need (research -> inventory creates priced products -> marketing and finance in parallel).
+- Speed matters more than polish: use only the members the goal needs, and tell research-agent to stop after about 3 searches.
 - Each brief must stand alone: the goal, the facts and record ids from earlier steps (supplier ids, SKUs, prices), and exactly what to deliver.
 - Read each member's report. If a member reports PROBLEMS or a step failed, retry once with a corrected brief, give it to another member, or do it yourself.
-- ALWAYS finish a multi-step goal by running qa-agent with the list of what was supposed to be delivered. If it reports FAILED, have the right member fix it and run qa-agent again (at most twice). Only then write the summary, and say the quality check passed (or what is still open).
+- ALWAYS finish a multi-step goal by running qa-agent with the list of what was supposed to be delivered. If it reports FAILED, have the right member fix it and run qa-agent again (once only). Only then write the summary, and say the quality check passed (or what is still open).
 ` : ''}
 8. Files from the owner. When the owner attaches photos, PDFs, spreadsheets or videos, you are their back office: read every file, work out what each one is, and put it into the business yourself without asking:
    - sales receipt, POS slip, order screenshot, marketplace order list → record_sale for each sale (paymentStatus as the document shows; create missing products first), then fulfil if handed over;
@@ -184,9 +185,27 @@ export function isBusinessBusy(businessId: string) {
   return false;
 }
 
-export async function startTask(businessId: string, prompt: string, conversationId?: string | null, attachments: Attachment[] = []): Promise<AgentTask> {
+/** Goals BizPilot started by itself (reactor, daily autopilot): they give way to the owner. */
+const isBackground = (conversationId?: string | null) => /^(auto|autopilot)-/.test(conversationId ?? '');
+
+/**
+ * The owner's goal goes first: background runs are paused (left open, so the resume
+ * check continues them once the server is free) instead of making the owner wait.
+ */
+function pauseBackgroundRuns() {
   for (const l of live.values()) {
-    if (l.businessId === businessId) throw new Error('WorkBuddy is still working on the previous goal. Wait for it or cancel it.');
+    if (!isBackground(l.task.conversationId) || l.handoff) continue;
+    l.handoff = true;
+    push(l, { kind: 'status', text: 'Paused so the owner\'s goal can go first. This continues by itself afterwards.', data: { handoff: true } });
+    l.abort.abort();
+    l.interrupt?.();
+  }
+}
+
+export async function startTask(businessId: string, prompt: string, conversationId?: string | null, attachments: Attachment[] = []): Promise<AgentTask> {
+  if (!isBackground(conversationId ?? '')) pauseBackgroundRuns();
+  for (const l of live.values()) {
+    if (l.businessId === businessId && !l.handoff) throw new Error('WorkBuddy is still working on the previous goal. Wait for it or cancel it.');
   }
   const history = conversationId ? await chatContext(businessId, conversationId) : '';
   const now = new Date().toISOString();
@@ -214,7 +233,7 @@ export async function startTask(businessId: string, prompt: string, conversation
  */
 let line: Promise<void> = Promise.resolve();
 function enqueue(l: Live) {
-  if (live.size > 1) {
+  if ([...live.values()].filter((x) => !x.handoff).length > 1) {
     push(l, { kind: 'status', text: 'Waiting for BizPilot to finish another goal first…' });
     void flush(l);
   }
@@ -245,7 +264,7 @@ async function run(l: Live) {
     const env = runtimeEnv();
     if (team) {
       env.CODEBUDDY_DISABLE_BUILTIN_SUBAGENTS = '1'; // only BizPilot's team, no coding agents
-      env.CODEBUDDY_SUBAGENT_TIMEOUT_MS ||= '420000'; // a stuck member hands back to the lead instead of hanging
+      env.CODEBUDDY_SUBAGENT_TIMEOUT_MS ||= '240000'; // a stuck member hands back to the lead instead of hanging
     }
     /** Lead's Agent tool call id -> member name, to label each member's steps. */
     const members = new Map<string, string>();
@@ -471,7 +490,7 @@ export async function resumeInterruptedTasks() {
     if (resumes >= MAX_RESUMES) {
       await admin.from('agent_tasks').update({
         status: 'failed', updated_at: now,
-        result: 'Stopped: the BizPilot server restarted several times during this goal. The steps above were saved; send the goal again to finish it.',
+        result: 'Stopped: this goal was interrupted several times. The steps above were saved; send the goal again to finish it.',
       }).eq('id', id).in('status', ['starting', 'running', 'waiting_permission']);
       continue;
     }
@@ -492,12 +511,12 @@ export async function resumeInterruptedTasks() {
     }
     const l: Live = { task, attachments: [], businessId, history: '', abort: new AbortController(), dirty: true };
     for (const [mid, agent] of open) push(l, { kind: 'status', text: `${labelOf(agent)} was cut off by the restart`, data: { id: mid, agent, team: 'failed' } });
-    push(l, { kind: 'status', text: 'Continuing where BizPilot stopped (the server restarted)…', data: { resumed: true } });
+    push(l, { kind: 'status', text: 'Continuing where BizPilot stopped…', data: { resumed: true } });
     const fileEvent = events.find((e) => Array.isArray(dataOf(e).attachments));
     const files = (fileEvent ? dataOf(fileEvent).attachments : undefined) as { name: string; path?: string }[] | undefined;
     l.history = row.conversation_id && row.conversation_id !== id ? await chatContext(businessId, String(row.conversation_id), id).catch(() => '') : '';
     l.resumeNote = [
-      'IMPORTANT: you already started this goal, but BizPilot\'s server restarted and cut you off. Continue from where you stopped.',
+      'IMPORTANT: you already started this goal, but you were cut off (BizPilot\'s server restarted, or the owner\'s own goal went first). Continue from where you stopped.',
       'Do NOT redo steps listed below (records they created already exist; check with read tools if unsure) and do not create duplicates.',
       files?.length ? `The owner had attached: ${files.map((f) => `"${f.name}"${f.path ? ` (stored as ${f.path})` : ''}`).join(', ')}. Their contents are no longer available; rely on what the steps below already recorded.` : '',
       `Steps already done:\n${doneSoFar(events) || '(none yet)'}`,
